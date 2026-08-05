@@ -1,0 +1,1507 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import api from "@/lib/api";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
+
+const emptyCustomer = {
+  _id: "",
+  name: "",
+  phone: "",
+  email: "",
+  address: "",
+};
+
+export default function BillingPage() {
+  const [products, setProducts] = useState([]);
+  const [customers, setCustomers] = useState([]);
+
+  const [search, setSearch] = useState("");
+  const [customerSearch, setCustomerSearch] = useState("");
+
+  const [cart, setCart] = useState([]);
+  const [selectedCustomer, setSelectedCustomer] =
+    useState(emptyCustomer);
+
+  const [paymentMethod, setPaymentMethod] = useState("cash");
+
+  const [loading, setLoading] = useState(true);
+  const [generating, setGenerating] = useState(false);
+
+
+
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const [productsRes, customersRes] =
+          await Promise.all([
+            api.get("/products"),
+            api.get("/customers"),
+          ]);
+
+        setProducts(
+          Array.isArray(productsRes.data)
+            ? productsRes.data
+            : []
+        );
+
+        setCustomers(
+          Array.isArray(customersRes.data)
+            ? customersRes.data
+            : []
+        );
+      } catch (error) {
+        console.error(
+          "Data loading error:",
+          error.response?.data || error.message
+        );
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    loadData();
+  }, []);
+
+
+
+  useEffect(() => {
+    const savedCustomer =
+      sessionStorage.getItem("selectedCustomer");
+
+    if (savedCustomer) {
+      try {
+        const customer = JSON.parse(savedCustomer);
+
+        setSelectedCustomer({
+          _id: customer._id || "",
+          name: customer.name || "",
+          phone: customer.phone || "",
+          email: customer.email || "",
+          address: customer.address || "",
+        });
+
+        sessionStorage.removeItem("selectedCustomer");
+      } catch (error) {
+        console.error(
+          "Selected customer error:",
+          error
+        );
+      }
+    }
+  }, []);
+
+
+
+  const filteredProducts = useMemo(() => {
+    const value = search.toLowerCase().trim();
+
+    return products.filter((product) => {
+      return (
+        product.name
+          ?.toLowerCase()
+          .includes(value) ||
+        product.sku
+          ?.toLowerCase()
+          .includes(value)
+      );
+    });
+  }, [products, search]);
+
+  
+
+  const filteredCustomers = useMemo(() => {
+    const value = customerSearch
+      .toLowerCase()
+      .trim();
+
+    if (!value) return customers.slice(0, 8);
+
+    return customers.filter((customer) => {
+      return (
+        customer.name
+          ?.toLowerCase()
+          .includes(value) ||
+        customer.phone
+          ?.toLowerCase()
+          .includes(value) ||
+        customer.email
+          ?.toLowerCase()
+          .includes(value)
+      );
+    });
+  }, [customers, customerSearch]);
+
+  
+
+  const selectCustomer = (customer) => {
+    setSelectedCustomer({
+      _id: customer._id || "",
+      name: customer.name || "",
+      phone: customer.phone || "",
+      email: customer.email || "",
+      address: customer.address || "",
+    });
+
+    setCustomerSearch("");
+  };
+
+  
+
+  const clearCustomer = () => {
+    setSelectedCustomer(emptyCustomer);
+    setCustomerSearch("");
+  };
+
+  
+
+  const addToCart = (product) => {
+    setCart((prev) => {
+      const existing = prev.find(
+        (item) => item.productId === product._id
+      );
+
+      if (existing) {
+        return prev.map((item) =>
+          item.productId === product._id
+            ? {
+                ...item,
+                qty: item.qty + 1,
+              }
+            : item
+        );
+      }
+
+      return [
+        ...prev,
+        {
+          productId: product._id,
+          name: product.name,
+          sku: product.sku || "-",
+          price: Number(product.price || 0),
+          taxRate: Number(product.taxRate || 0),
+          qty: 1,
+        },
+      ];
+    });
+  };
+
+
+  const updateQty = (productId, qty) => {
+    const newQty = Number(qty);
+
+    if (newQty <= 0 || Number.isNaN(newQty)) {
+      setCart((prev) =>
+        prev.filter(
+          (item) => item.productId !== productId
+        )
+      );
+
+      return;
+    }
+
+    setCart((prev) =>
+      prev.map((item) =>
+        item.productId === productId
+          ? {
+              ...item,
+              qty: newQty,
+            }
+          : item
+      )
+    );
+  };
+
+ 
+
+  const removeItem = (productId) => {
+    setCart((prev) =>
+      prev.filter(
+        (item) => item.productId !== productId
+      )
+    );
+  };
+
+ 
+
+  const subtotal = cart.reduce(
+    (sum, item) =>
+      sum + item.price * item.qty,
+    0
+  );
+
+  const taxTotal = cart.reduce(
+    (sum, item) =>
+      sum +
+      (item.price *
+        item.qty *
+        item.taxRate) /
+        100,
+    0
+  );
+
+  const grandTotal = subtotal + taxTotal;
+
+
+
+  const numberToWords = (amount) => {
+    const ones = [
+      "",
+      "One",
+      "Two",
+      "Three",
+      "Four",
+      "Five",
+      "Six",
+      "Seven",
+      "Eight",
+      "Nine",
+      "Ten",
+      "Eleven",
+      "Twelve",
+      "Thirteen",
+      "Fourteen",
+      "Fifteen",
+      "Sixteen",
+      "Seventeen",
+      "Eighteen",
+      "Nineteen",
+    ];
+
+    const tens = [
+      "",
+      "",
+      "Twenty",
+      "Thirty",
+      "Forty",
+      "Fifty",
+      "Sixty",
+      "Seventy",
+      "Eighty",
+      "Ninety",
+    ];
+
+    const convert = (num) => {
+      if (num < 20) return ones[num];
+
+      if (num < 100) {
+        return (
+          tens[Math.floor(num / 10)] +
+          (num % 10
+            ? " " + ones[num % 10]
+            : "")
+        );
+      }
+
+      if (num < 1000) {
+        return (
+          ones[Math.floor(num / 100)] +
+          " Hundred" +
+          (num % 100
+            ? " " + convert(num % 100)
+            : "")
+        );
+      }
+
+      if (num < 100000) {
+        return (
+          convert(Math.floor(num / 1000)) +
+          " Thousand" +
+          (num % 1000
+            ? " " + convert(num % 1000)
+            : "")
+        );
+      }
+
+      if (num < 10000000) {
+        return (
+          convert(Math.floor(num / 100000)) +
+          " Lakh" +
+          (num % 100000
+            ? " " + convert(num % 100000)
+            : "")
+        );
+      }
+
+      return (
+        convert(Math.floor(num / 10000000)) +
+        " Crore" +
+        (num % 10000000
+          ? " " + convert(num % 10000000)
+          : "")
+      );
+    };
+
+    const rupees = Math.floor(amount);
+    const paise = Math.round(
+      (amount - rupees) * 100
+    );
+
+    let result =
+      rupees === 0
+        ? "Zero Rupees"
+        : `${convert(rupees)} Rupees`;
+
+    if (paise > 0) {
+      result += ` and ${convert(paise)} Paise`;
+    }
+
+    return `${result} Only`;
+  };
+
+ 
+
+  const generateInvoicePDF = (invoiceNumber) => {
+    const doc = new jsPDF({
+      orientation: "portrait",
+      unit: "mm",
+      format: "a4",
+    });
+
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight =
+      doc.internal.pageSize.getHeight();
+
+    const margin = 12;
+
+    doc.setDrawColor(40, 40, 40);
+    doc.setLineWidth(0.4);
+
+    doc.rect(
+      margin,
+      margin,
+      pageWidth - margin * 2,
+      pageHeight - margin * 2
+    );
+
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(20);
+
+    doc.setTextColor(16, 27, 61);
+
+    doc.text(
+      "PayFourSave",
+      margin + 6,
+      22
+    );
+
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(90, 90, 90);
+
+    doc.text(
+      "Professional Billing & Invoice Management",
+      margin + 6,
+      28
+    );
+
+    doc.text(
+      "GSTIN: 08ABCDE1234F1Z5",
+      margin + 6,
+      34
+    );
+
+    doc.text(
+      "Jaipur, Rajasthan, India",
+      margin + 6,
+      39
+    );
+
+    // -----------------------------------------
+    // INVOICE TITLE
+    // -----------------------------------------
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(18);
+    doc.setTextColor(245, 165, 36);
+
+    doc.text(
+      "TAX INVOICE",
+      pageWidth - margin - 6,
+      22,
+      { align: "right" }
+    );
+
+    doc.setFontSize(9);
+    doc.setTextColor(60, 60, 60);
+    doc.setFont("helvetica", "normal");
+
+    doc.text(
+      `Invoice No: ${invoiceNumber}`,
+      pageWidth - margin - 6,
+      29,
+      { align: "right" }
+    );
+
+    doc.text(
+      `Date: ${new Date().toLocaleDateString(
+        "en-IN"
+      )}`,
+      pageWidth - margin - 6,
+      35,
+      { align: "right" }
+    );
+
+    doc.text(
+      `Payment: ${paymentMethod.toUpperCase()}`,
+      pageWidth - margin - 6,
+      41,
+      { align: "right" }
+    );
+
+    // -----------------------------------------
+    // HEADER LINE
+    // -----------------------------------------
+
+    doc.setDrawColor(220, 220, 220);
+
+    doc.line(
+      margin + 5,
+      45,
+      pageWidth - margin - 5,
+      45
+    );
+
+    // -----------------------------------------
+    // CUSTOMER DETAILS
+    // -----------------------------------------
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(16, 27, 61);
+
+    doc.text(
+      "BILL TO",
+      margin + 6,
+      53
+    );
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(9);
+    doc.setTextColor(50, 50, 50);
+
+    doc.text(
+      `Name: ${selectedCustomer.name || "Walk-in Customer"}`,
+      margin + 6,
+      60
+    );
+
+    doc.text(
+      `Phone: ${selectedCustomer.phone || "-"}`,
+      margin + 6,
+      66
+    );
+
+    doc.text(
+      `Email: ${selectedCustomer.email || "-"}`,
+      margin + 6,
+      72
+    );
+
+    doc.text(
+      `Address: ${selectedCustomer.address || "-"}`,
+      margin + 6,
+      78
+    );
+
+    // -----------------------------------------
+    // ITEMS TABLE
+    // -----------------------------------------
+
+    const tableRows = cart.map(
+      (item, index) => {
+        const taxable =
+          item.price * item.qty;
+
+        const tax =
+          (taxable * item.taxRate) / 100;
+
+        const total = taxable + tax;
+
+        return [
+          index + 1,
+          item.name,
+          item.sku,
+          item.qty,
+          `Rs. ${item.price.toFixed(2)}`,
+          `${item.taxRate}%`,
+          `Rs. ${tax.toFixed(2)}`,
+          `Rs. ${total.toFixed(2)}`,
+        ];
+      }
+    );
+
+    autoTable(doc, {
+      startY: 85,
+
+      margin: {
+        left: margin + 5,
+        right: margin + 5,
+      },
+
+      head: [
+        [
+          "#",
+          "Product",
+          "SKU",
+          "Qty",
+          "Rate",
+          "Tax",
+          "Tax Amt.",
+          "Amount",
+        ],
+      ],
+
+      body: tableRows,
+
+      theme: "grid",
+
+      styles: {
+        font: "helvetica",
+        fontSize: 8,
+        cellPadding: 3,
+        lineColor: [210, 210, 210],
+        lineWidth: 0.2,
+        textColor: [40, 40, 40],
+      },
+
+      headStyles: {
+        fillColor: [16, 27, 61],
+        textColor: [255, 255, 255],
+        fontStyle: "bold",
+        halign: "center",
+      },
+
+      columnStyles: {
+        0: {
+          halign: "center",
+          cellWidth: 9,
+        },
+
+        1: {
+          cellWidth: 42,
+        },
+
+        2: {
+          cellWidth: 23,
+        },
+
+        3: {
+          halign: "center",
+          cellWidth: 12,
+        },
+
+        4: {
+          halign: "right",
+          cellWidth: 25,
+        },
+
+        5: {
+          halign: "center",
+          cellWidth: 16,
+        },
+
+        6: {
+          halign: "right",
+          cellWidth: 25,
+        },
+
+        7: {
+          halign: "right",
+          cellWidth: 27,
+        },
+      },
+    });
+
+    // -----------------------------------------
+    // TOTALS
+    // -----------------------------------------
+
+    const finalY =
+      doc.lastAutoTable.finalY + 8;
+
+    const totalX =
+      pageWidth - margin - 6;
+
+    doc.setFontSize(9);
+    doc.setFont("helvetica", "normal");
+    doc.setTextColor(70, 70, 70);
+
+    doc.text(
+      "Subtotal:",
+      totalX - 55,
+      finalY
+    );
+
+    doc.text(
+      `Rs. ${subtotal.toFixed(2)}`,
+      totalX,
+      finalY,
+      { align: "right" }
+    );
+
+    doc.text(
+      "Tax:",
+      totalX - 55,
+      finalY + 6
+    );
+
+    doc.text(
+      `Rs. ${taxTotal.toFixed(2)}`,
+      totalX,
+      finalY + 6,
+      { align: "right" }
+    );
+
+    doc.setFillColor(16, 27, 61);
+
+    doc.roundedRect(
+      totalX - 72,
+      finalY + 10,
+      72,
+      12,
+      2,
+      2,
+      "F"
+    );
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11);
+    doc.setTextColor(255, 255, 255);
+
+    doc.text(
+      "GRAND TOTAL",
+      totalX - 66,
+      finalY + 18
+    );
+
+    doc.text(
+      `Rs. ${grandTotal.toFixed(2)}`,
+      totalX - 5,
+      finalY + 18,
+      { align: "right" }
+    );
+
+    // -----------------------------------------
+    // AMOUNT IN WORDS
+    // -----------------------------------------
+
+    doc.setTextColor(50, 50, 50);
+    doc.setFontSize(8);
+    doc.setFont("helvetica", "normal");
+
+    doc.text(
+      `Amount in Words: ${numberToWords(
+        grandTotal
+      )}`,
+      margin + 6,
+      finalY + 31
+    );
+
+    // -----------------------------------------
+    // TERMS
+    // -----------------------------------------
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9);
+    doc.setTextColor(16, 27, 61);
+
+    doc.text(
+      "Terms & Conditions",
+      margin + 6,
+      finalY + 44
+    );
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(7.5);
+    doc.setTextColor(90, 90, 90);
+
+    doc.text(
+      "1. Goods once sold are subject to company return policy.",
+      margin + 6,
+      finalY + 50
+    );
+
+    doc.text(
+      "2. Please retain this invoice for future reference.",
+      margin + 6,
+      finalY + 56
+    );
+
+    doc.text(
+      "3. All disputes are subject to local jurisdiction.",
+      margin + 6,
+      finalY + 62
+    );
+
+    // -----------------------------------------
+    // SIGNATURE
+    // -----------------------------------------
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(8);
+
+    doc.text(
+      "Authorized Signature",
+      pageWidth - margin - 6,
+      pageHeight - 31,
+      { align: "right" }
+    );
+
+    doc.line(
+      pageWidth - margin - 55,
+      pageHeight - 34,
+      pageWidth - margin - 6,
+      pageHeight - 34
+    );
+
+    // -----------------------------------------
+    // FOOTER
+    // -----------------------------------------
+
+    doc.setFontSize(7);
+    doc.setTextColor(130, 130, 130);
+
+    doc.text(
+      "Thank you for your business!",
+      pageWidth / 2,
+      pageHeight - 20,
+      { align: "center" }
+    );
+
+    doc.text(
+      "Generated by Billing Software",
+      pageWidth / 2,
+      pageHeight - 16,
+      { align: "center" }
+    );
+
+    // Open PDF in new tab
+    doc.output("dataurlnewwindow");
+  };
+
+  // =========================================
+  // CHECKOUT
+  // =========================================
+
+  const checkout = async () => {
+    if (cart.length === 0) {
+      alert("Please add at least one product.");
+      return;
+    }
+
+    try {
+      setGenerating(true);
+
+      const payload = {
+        customerId:
+          selectedCustomer._id || null,
+
+        items: cart.map((item) => ({
+          productId: item.productId,
+          qty: item.qty,
+        })),
+
+        paymentMethod,
+      };
+
+      const res = await api.post(
+        "/invoices",
+        payload
+      );
+
+      const invoiceNumber =
+        res.data?.invoiceNumber ||
+        `INV-${Date.now()}`;
+
+      generateInvoicePDF(invoiceNumber);
+
+      alert(
+        `Bill generated successfully: ${invoiceNumber}`
+      );
+
+      setCart([]);
+      clearCustomer();
+    } catch (error) {
+      console.error(
+        "Invoice error:",
+        error.response?.data || error.message
+      );
+
+      alert(
+        error.response?.data?.message ||
+          "Bill generate nahi ho paya."
+      );
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  // =========================================
+  // LOADING
+  // =========================================
+
+  if (loading) {
+    return (
+      <div className="flex min-h-[70vh] items-center justify-center bg-slate-50">
+        <div className="text-center">
+          <div className="mx-auto h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-indigo-600" />
+
+          <p className="mt-3 text-sm text-slate-500">
+            Loading billing data...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 p-4 sm:p-6 lg:p-8">
+
+      <div className="mx-auto max-w-[1500px]">
+
+        {/* ======================================
+            PAGE HEADER
+        ======================================= */}
+
+        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight text-slate-900">
+              Create Invoice
+            </h1>
+
+            <p className="mt-1 text-sm text-slate-500">
+              Create professional tax invoice for your customer.
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 shadow-sm">
+            <p className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+              Current Total
+            </p>
+
+            <p className="text-xl font-bold text-indigo-600">
+              ₹{grandTotal.toFixed(2)}
+            </p>
+          </div>
+
+        </div>
+
+        {/* ======================================
+            CUSTOMER DETAILS
+        ======================================= */}
+
+        <div className="mb-6 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+
+          <div className="mb-4 flex items-center justify-between">
+
+            <div>
+              <h2 className="text-base font-bold text-slate-900">
+                Customer Details
+              </h2>
+
+              {/* <p className="mt-1 text-xs text-slate-400">
+                Customer page se select kiya hua data yahan automatically fill hoga.
+              </p> */}
+            </div>
+
+            {selectedCustomer._id && (
+              <button
+                type="button"
+                onClick={clearCustomer}
+                className="rounded-lg px-3 py-2 text-xs font-semibold text-red-500 hover:bg-red-50"
+              >
+                Clear Customer
+              </button>
+            )}
+
+          </div>
+
+          {/* CUSTOMER SEARCH */}
+
+          <div className="relative mb-4">
+
+            <input
+              value={
+                customerSearch ||
+                selectedCustomer.name
+              }
+              onChange={(e) => {
+                setCustomerSearch(e.target.value);
+
+                if (selectedCustomer._id) {
+                  setSelectedCustomer(
+                    emptyCustomer
+                  );
+                }
+              }}
+              placeholder="Search customer by name, phone or email..."
+              className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+            />
+
+            {/* SEARCH RESULTS */}
+
+            {customerSearch &&
+              !selectedCustomer._id &&
+              filteredCustomers.length > 0 && (
+                <div className="absolute left-0 right-0 top-full z-30 mt-2 max-h-60 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
+
+                  {filteredCustomers.map(
+                    (customer) => (
+                      <button
+                        type="button"
+                        key={customer._id}
+                        onClick={() =>
+                          selectCustomer(customer)
+                        }
+                        className="flex w-full items-center justify-between border-b border-slate-100 px-4 py-3 text-left transition hover:bg-indigo-50"
+                      >
+
+                        <div>
+                          <p className="text-sm font-semibold text-slate-800">
+                            {customer.name}
+                          </p>
+
+                          <p className="text-xs text-slate-400">
+                            {customer.phone}
+                            {customer.email
+                              ? ` · ${customer.email}`
+                              : ""}
+                          </p>
+                        </div>
+
+                        <span className="text-xs font-semibold text-indigo-600">
+                          Select
+                        </span>
+
+                      </button>
+                    )
+                  )}
+
+                </div>
+              )}
+
+          </div>
+
+          {/* CUSTOMER DATA */}
+
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                Customer Name
+              </p>
+
+              <p className="mt-1 font-semibold text-slate-800">
+                {selectedCustomer.name ||
+                  "Walk-in Customer"}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                Phone
+              </p>
+
+              <p className="mt-1 font-medium text-slate-700">
+                {selectedCustomer.phone ||
+                  "-"}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                Email
+              </p>
+
+              <p className="mt-1 truncate font-medium text-slate-700">
+                {selectedCustomer.email ||
+                  "-"}
+              </p>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                Address
+              </p>
+
+              <p className="mt-1 truncate font-medium text-slate-700">
+                {selectedCustomer.address ||
+                  "-"}
+              </p>
+            </div>
+
+          </div>
+
+        </div>
+
+        {/* ======================================
+            MAIN BILLING AREA
+        ======================================= */}
+
+        <div className="grid grid-cols-1 gap-6 xl:grid-cols-[1fr_360px]">
+
+          {/* ====================================
+              LEFT SIDE
+          ===================================== */}
+
+          <div>
+
+            {/* SEARCH PRODUCTS */}
+
+            <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+
+              <div className="flex flex-col gap-3 sm:flex-row">
+
+                <input
+                  value={search}
+                  onChange={(e) =>
+                    setSearch(e.target.value)
+                  }
+                  placeholder="Search product / scan SKU..."
+                  className="flex-1 rounded-xl border border-slate-200 px-4 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+                />
+
+                <div className="rounded-xl bg-slate-50 px-4 py-3 text-sm text-slate-500">
+                  {filteredProducts.length} Products
+                </div>
+
+              </div>
+
+            </div>
+
+            {/* PRODUCT CARDS */}
+
+            <div className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+
+              {filteredProducts.map(
+                (product) => (
+                  <button
+                    key={product._id}
+                    type="button"
+                    onClick={() =>
+                      addToCart(product)
+                    }
+                    disabled={
+                      Number(product.stock) <= 0
+                    }
+                    className="group rounded-2xl border border-slate-200 bg-white p-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+
+                    <div className="mb-3 flex items-start justify-between">
+
+                      <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-indigo-50 text-lg">
+                        📦
+                      </div>
+
+                      <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[10px] font-semibold text-emerald-600">
+                        Stock: {product.stock}
+                      </span>
+
+                    </div>
+
+                    <p className="font-semibold text-slate-800">
+                      {product.name}
+                    </p>
+
+                    <p className="mt-1 text-xs text-slate-400">
+                      SKU: {product.sku || "-"}
+                    </p>
+
+                    <div className="mt-3 flex items-end justify-between">
+
+                      <div>
+                        <p className="text-lg font-bold text-indigo-600">
+                          ₹
+                          {Number(
+                            product.price || 0
+                          ).toFixed(2)}
+                        </p>
+
+                        <p className="text-[11px] text-slate-400">
+                          Tax:{" "}
+                          {product.taxRate || 0}%
+                        </p>
+                      </div>
+
+                      <span className="rounded-lg bg-indigo-600 px-3 py-2 text-xs font-semibold text-white transition group-hover:bg-indigo-700">
+                        + Add
+                      </span>
+
+                    </div>
+
+                  </button>
+                )
+              )}
+
+              {filteredProducts.length === 0 && (
+                <div className="col-span-full rounded-2xl border border-dashed border-slate-300 bg-white py-12 text-center">
+
+                  <div className="text-3xl">
+                    📦
+                  </div>
+
+                  <p className="mt-2 font-medium text-slate-600">
+                    No products found
+                  </p>
+
+                  <p className="mt-1 text-xs text-slate-400">
+                    Try another product name or SKU.
+                  </p>
+
+                </div>
+              )}
+
+            </div>
+
+            {/* ==================================
+                EXCEL STYLE BILL TABLE
+            =================================== */}
+
+            <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+
+              <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
+
+                <div>
+                  <h2 className="font-bold text-slate-900">
+                    Invoice Items
+                  </h2>
+
+                  <p className="text-xs text-slate-400">
+                    Excel-style billing table
+                  </p>
+                </div>
+
+                <span className="rounded-full bg-indigo-50 px-3 py-1 text-xs font-semibold text-indigo-600">
+                  {cart.length} Items
+                </span>
+
+              </div>
+
+              <div className="overflow-x-auto">
+
+                <table className="w-full min-w-[900px] border-collapse text-sm">
+
+                  <thead>
+                    <tr className="border-b border-slate-300 bg-slate-100">
+
+                      <th className="border-r border-slate-200 px-3 py-3 text-center font-bold text-slate-600">
+                        #
+                      </th>
+
+                      <th className="border-r border-slate-200 px-3 py-3 text-left font-bold text-slate-600">
+                        Product
+                      </th>
+
+                      <th className="border-r border-slate-200 px-3 py-3 text-left font-bold text-slate-600">
+                        SKU
+                      </th>
+
+                      <th className="border-r border-slate-200 px-3 py-3 text-center font-bold text-slate-600">
+                        Qty
+                      </th>
+
+                      <th className="border-r border-slate-200 px-3 py-3 text-right font-bold text-slate-600">
+                        Rate
+                      </th>
+
+                      <th className="border-r border-slate-200 px-3 py-3 text-center font-bold text-slate-600">
+                        Tax %
+                      </th>
+
+                      <th className="border-r border-slate-200 px-3 py-3 text-right font-bold text-slate-600">
+                        Tax
+                      </th>
+
+                      <th className="border-r border-slate-200 px-3 py-3 text-right font-bold text-slate-600">
+                        Total
+                      </th>
+
+                      <th className="px-3 py-3 text-center font-bold text-slate-600">
+                        Action
+                      </th>
+
+                    </tr>
+                  </thead>
+
+                  <tbody>
+
+                    {cart.length === 0 ? (
+                      <tr>
+                        <td
+                          colSpan="9"
+                          className="py-16 text-center"
+                        >
+
+                          <div className="text-4xl">
+                            🧾
+                          </div>
+
+                          <p className="mt-3 font-semibold text-slate-600">
+                            No items added
+                          </p>
+
+                          <p className="mt-1 text-xs text-slate-400">
+                            Product cards ke Add button par click karein.
+                          </p>
+
+                        </td>
+                      </tr>
+                    ) : (
+                      cart.map(
+                        (item, index) => {
+                          const taxable =
+                            item.price *
+                            item.qty;
+
+                          const tax =
+                            (taxable *
+                              item.taxRate) /
+                            100;
+
+                          const total =
+                            taxable + tax;
+
+                          return (
+                            <tr
+                              key={
+                                item.productId
+                              }
+                              className="border-b border-slate-200 transition hover:bg-indigo-50/30"
+                            >
+
+                              <td className="border-r border-slate-100 px-3 py-3 text-center text-slate-400">
+                                {index + 1}
+                              </td>
+
+                              <td className="border-r border-slate-100 px-3 py-3 font-semibold text-slate-800">
+                                {item.name}
+                              </td>
+
+                              <td className="border-r border-slate-100 px-3 py-3 text-xs text-slate-500">
+                                {item.sku}
+                              </td>
+
+                              <td className="border-r border-slate-100 px-3 py-3 text-center">
+
+                                <input
+                                  type="number"
+                                  min="1"
+                                  value={item.qty}
+                                  onChange={(e) =>
+                                    updateQty(
+                                      item.productId,
+                                      e.target.value
+                                    )
+                                  }
+                                  className="w-16 rounded-lg border border-slate-200 px-2 py-1.5 text-center text-sm font-semibold outline-none focus:border-indigo-500"
+                                />
+
+                              </td>
+
+                              <td className="border-r border-slate-100 px-3 py-3 text-right font-medium text-slate-700">
+                                ₹
+                                {item.price.toFixed(
+                                  2
+                                )}
+                              </td>
+
+                              <td className="border-r border-slate-100 px-3 py-3 text-center">
+
+                                <span className="rounded-full bg-amber-50 px-2 py-1 text-xs font-semibold text-amber-600">
+                                  {item.taxRate}%
+                                </span>
+
+                              </td>
+
+                              <td className="border-r border-slate-100 px-3 py-3 text-right text-slate-600">
+                                ₹
+                                {tax.toFixed(2)}
+                              </td>
+
+                              <td className="border-r border-slate-100 px-3 py-3 text-right font-bold text-slate-900">
+                                ₹
+                                {total.toFixed(2)}
+                              </td>
+
+                              <td className="px-3 py-3 text-center">
+
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    removeItem(
+                                      item.productId
+                                    )
+                                  }
+                                  className="rounded-lg px-2 py-1 text-red-500 hover:bg-red-50"
+                                >
+                                  ×
+                                </button>
+
+                              </td>
+
+                            </tr>
+                          );
+                        }
+                      )
+                    )}
+
+                  </tbody>
+
+                </table>
+
+              </div>
+
+            </div>
+
+          </div>
+
+          {/* ====================================
+              RIGHT SUMMARY
+          ===================================== */}
+
+          <div className="h-fit xl:sticky xl:top-24">
+
+            <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+
+              <div className="mb-5">
+
+                <h2 className="text-lg font-bold text-slate-900">
+                  Bill Summary
+                </h2>
+
+                <p className="mt-1 text-xs text-slate-400">
+                  Final invoice amount
+                </p>
+
+              </div>
+
+              {/* SUMMARY */}
+
+              <div className="space-y-3 border-b border-slate-200 pb-5">
+
+                <div className="flex justify-between text-sm">
+                  <span className="text-slate-500">
+                    Items
+                  </span>
+
+                  <span className="font-semibold text-slate-800">
+                    {cart.reduce(
+                      (sum, item) =>
+                        sum + item.qty,
+                      0
+                    )}
+                  </span>
+                </div>
+
+                <div className="flex justify-between text-sm">
+                  <span className="text-slate-500">
+                    Subtotal
+                  </span>
+
+                  <span className="font-semibold text-slate-800">
+                    ₹{subtotal.toFixed(2)}
+                  </span>
+                </div>
+
+                <div className="flex justify-between text-sm">
+                  <span className="text-slate-500">
+                    Total Tax
+                  </span>
+
+                  <span className="font-semibold text-amber-600">
+                    ₹{taxTotal.toFixed(2)}
+                  </span>
+                </div>
+
+              </div>
+
+              {/* GRAND TOTAL */}
+
+              <div className="my-5 rounded-xl bg-slate-900 p-4">
+
+                <p className="text-xs font-medium text-slate-400">
+                  GRAND TOTAL
+                </p>
+
+                <p className="mt-1 text-3xl font-bold text-white">
+                  ₹{grandTotal.toFixed(2)}
+                </p>
+
+              </div>
+
+              {/* PAYMENT */}
+
+              <label className="mb-2 block text-xs font-semibold text-slate-600">
+                Payment Method
+              </label>
+
+              <select
+                value={paymentMethod}
+                onChange={(e) =>
+                  setPaymentMethod(
+                    e.target.value
+                  )
+                }
+                className="w-full rounded-xl border border-slate-200 px-3 py-3 text-sm outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-100"
+              >
+                <option value="cash">
+                  Cash
+                </option>
+
+                <option value="card">
+                  Card
+                </option>
+
+                <option value="upi">
+                  UPI
+                </option>
+
+                <option value="bank">
+                  Bank Transfer
+                </option>
+              </select>
+
+              {/* GENERATE */}
+
+              <button
+                type="button"
+                onClick={checkout}
+                disabled={
+                  cart.length === 0 ||
+                  generating
+                }
+                className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-sm font-bold text-white shadow-sm transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+
+                {generating ? (
+                  <>
+                    <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    Generating...
+                  </>
+                ) : (
+                  <>
+                    <span>📄</span>
+                    Generate Bill & PDF
+                  </>
+                )}
+
+              </button>
+
+              <p className="mt-3 text-center text-[11px] text-slate-400">
+                A4 Tax Invoice PDF will open automatically.
+              </p>
+
+            </div>
+
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+  );
+}
