@@ -1403,9 +1403,7 @@ export default function BillingPage() {
                   UPI
                 </option>
 
-                <option value="bank">
-                  Bank Transfer
-                </option>
+                {/* fghkl;' */}
               </select>
 
               <button
