@@ -9,7 +9,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import connectDB from "./config/db.js";
 import authRoutes from "./routes/authRoutes.js";
-import productRoutes from "./routes/productRoutes.js";
+import productRoutes from "./routes/ProductRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
 import invoiceRoutes from "./routes/invoiceRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
