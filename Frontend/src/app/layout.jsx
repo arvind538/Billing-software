@@ -1,4 +1,5 @@
 import "./globals.css";
+
 import { Space_Grotesk, Inter } from "next/font/google";
 import { CartProvider } from "@/context/CartContext";
 import Navbar from "@/components/Navbar";
@@ -27,7 +28,6 @@ export default function RootLayout({ children }) {
     <html lang="en" className={`${spaceGrotesk.variable} ${inter.variable}`}>
       <body className="bg-slate-50 text-slate-900 min-h-screen">
         <CartProvider>
-
           <Navbar />
 
           {children}

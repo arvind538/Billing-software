@@ -5,10 +5,6 @@ import api from "@/lib/api";
 import { toast } from "react-toastify";
 
 export default function InvoicesPage() {
-  // =====================================================
-  // STATES
-  // =====================================================
-
   const [invoices, setInvoices] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [search, setSearch] = useState("");

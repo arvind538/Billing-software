@@ -62,6 +62,19 @@ function getInitials(name = "") {
   );
 }
 
+// Role ke hisaab se badge color/label decide karta hai (admin, cashier, ya default)
+function getRoleBadgeStyle(role) {
+  const normalized = (role || "").toLowerCase();
+
+  if (normalized === "admin") {
+    return { label: "Admin", bg: "#FEF3C7", color: "#92400E" };
+  }
+  if (normalized === "cashier") {
+    return { label: "Cashier", bg: "#DCFCE7", color: "#166534" };
+  }
+  return { label: role || "User", bg: "#F1F5F9", color: "#475569" };
+}
+
 function LogoutIcon() {
   return (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
@@ -103,6 +116,9 @@ function ProfileMenu({ user, activeCustomer, onLogout, align = "right" }) {
 
   if (!user) return null;
 
+  const roleBadge = getRoleBadgeStyle(user.role);
+  const isAdmin = user.role?.toLowerCase() === "admin";
+
   return (
     <div className="relative" ref={menuRef}>
       <button
@@ -137,9 +153,12 @@ function ProfileMenu({ user, activeCustomer, onLogout, align = "right" }) {
           <div className="max-w-[130px] truncate text-sm font-semibold" style={{ color: "#101828" }}>
             {user.name}
           </div>
-          <div className="text-[11px]" style={{ color: "#98A2B3" }}>
-            {user.role || "User"}
-          </div>
+          <span
+            className="mt-0.5 inline-block rounded-full px-1.5 py-[1px] text-[10px] font-semibold"
+            style={{ background: roleBadge.bg, color: roleBadge.color }}
+          >
+            {roleBadge.label}
+          </span>
         </div>
 
         <svg
@@ -178,9 +197,19 @@ function ProfileMenu({ user, activeCustomer, onLogout, align = "right" }) {
               <div className="truncate text-sm font-semibold" style={{ color: "#101828" }}>
                 {user.name}
               </div>
-              <div className="truncate text-xs" style={{ color: "#98A2B3" }}>
-                {user.email || user.role || "User"}
-              </div>
+
+              {user.email && (
+                <div className="truncate text-xs" style={{ color: "#98A2B3" }}>
+                  {user.email}
+                </div>
+              )}
+
+              <span
+                className="mt-1 inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold"
+                style={{ background: roleBadge.bg, color: roleBadge.color }}
+              >
+                {roleBadge.label}
+              </span>
             </div>
           </div>
 
@@ -213,6 +242,21 @@ function ProfileMenu({ user, activeCustomer, onLogout, align = "right" }) {
 
           {/* Menu items */}
           <div className="p-1.5">
+            {isAdmin && (
+              <Link
+                href="/admin"
+                onClick={() => setOpen(false)}
+                className="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-semibold transition-colors duration-150 hover:bg-amber-50"
+                style={{ color: "#92400E" }}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+                  <path d="M12 2 4 5v6c0 5 3.4 8.7 8 10 4.6-1.3 8-5 8-10V5l-8-3Z" />
+                  <path d="m9 12 2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                Admin Panel
+              </Link>
+            )}
+
             <button
               type="button"
               onClick={() => {
@@ -248,6 +292,16 @@ export default function Navbar() {
 
     let mounted = true;
 
+    // api
+    //   .get("/auth/me")
+    //   .then((res) => {
+    //     if (mounted) setUser(res.data);
+    //   })
+    //   .catch((error) => {
+    //     console.error("User fetch error:", error.response?.data || error.message);
+    //     if (mounted) setUser(null);
+    //   });
+
     api
       .get("/auth/me")
       .then((res) => {
@@ -256,6 +310,10 @@ export default function Navbar() {
       .catch((error) => {
         console.error("User fetch error:", error.response?.data || error.message);
         if (mounted) setUser(null);
+        // Stale cookie ho to usse clear kar do — taaki middleware bhi consistent rahe
+        if (error.response?.status === 401) {
+          api.post("/auth/logout").catch(() => { });
+        }
       });
 
     return () => {

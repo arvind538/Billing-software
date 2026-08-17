@@ -3,15 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev -H 10.122.237.144 -p 3000",
+    "dev": "next dev -H 10.29.152.144 -p 3000",
     "build": "next build",
-    "start": "next start -H 10.122.237.144 -p 3000",
+    "start": "next start -H 10.29.152.144 -p 3000",
     "lint": "eslint"
   },
   "dependencies": {
     "axios": "^1.19.0",
+    "jose": "^6.2.9",
     "jspdf": "^4.2.1",
     "jspdf-autotable": "^5.0.8",
+    "lucide-react": "^1.31.0",
     "next": "16.3.0",
     "qrcode": "^1.5.4",
     "react": "19.2.8",
