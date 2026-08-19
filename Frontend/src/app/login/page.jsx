@@ -39,7 +39,7 @@ function InvoiceMockup() {
   const [stamped, setStamped] = useState(false);
 
   useEffect(() => {
-    const t = setTimeout(() => setStamped(true), 700);
+    const t = setTimeout(() => setStamped(true), 400);
     return () => clearTimeout(t);
   }, []);
 

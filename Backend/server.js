@@ -40,5 +40,5 @@ app.get("/", (req, res) => res.send("Billing API running"));
 const PORT = process.env.PORT || 5000;
 
 app.listen(5000, "0.0.0.0", () => {
-    console.log("Server running on http://10.29.152.144:5000");
+    console.log("Server running on http://10.107.21.144:5000");
 });

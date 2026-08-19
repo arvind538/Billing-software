@@ -2,8 +2,9 @@ import "./globals.css";
 
 import { Space_Grotesk, Inter } from "next/font/google";
 import { CartProvider } from "@/context/CartContext";
-import Navbar from "@/components/Navbar";
 import { ToastContainer, toast } from 'react-toastify';
+import Sidebar from "@/components/Sidebar";
+
 
 
 const spaceGrotesk = Space_Grotesk({
@@ -28,13 +29,13 @@ export default function RootLayout({ children }) {
     <html lang="en" className={`${spaceGrotesk.variable} ${inter.variable}`}>
       <body className="bg-slate-50 text-slate-900 min-h-screen">
         <CartProvider>
-          <Navbar />
+          <Sidebar />
 
           {children}
         </CartProvider>
         <ToastContainer
           position="top-right"
-          autoClose={3000}
+          autoClose={2000}
           hideProgressBar={false}
           newestOnTop={false}
           closeOnClick={false}
