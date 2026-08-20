@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import api from "@/lib/api";
@@ -34,7 +34,6 @@ const navLinks = [
             </svg>
         ),
     },
-
     {
         href: "/products",
         label: "Products",
@@ -57,7 +56,6 @@ const navLinks = [
             </svg>
         ),
     },
-
     {
         href: "/customers",
         label: "Customers",
@@ -81,7 +79,6 @@ const navLinks = [
             </svg>
         ),
     },
-
     {
         href: "/invoices",
         label: "Invoices",
@@ -111,18 +108,21 @@ const navLinks = [
 // ======================================================
 
 function getInitials(name = "") {
+    const safeName = String(name || "").trim();
+
+    if (!safeName) return "U";
+
     return (
-        name
-            .trim()
+        safeName
             .split(/\s+/)
             .slice(0, 2)
-            .map((part) => part[0]?.toUpperCase())
+            .map((part) => part?.[0]?.toUpperCase() || "")
             .join("") || "U"
     );
 }
 
 function getRoleBadgeStyle(role) {
-    const normalized = (role || "").toLowerCase();
+    const normalized = String(role || "").toLowerCase();
 
     if (normalized === "admin") {
         return {
@@ -222,10 +222,8 @@ function ChevronIcon({ open }) {
             fill="none"
             stroke="currentColor"
             strokeWidth="2"
-            className="transition-transform duration-200"
-            style={{
-                transform: open ? "rotate(180deg)" : "rotate(0deg)",
-            }}
+            className={`transition-transform duration-200 ${open ? "rotate-180" : "rotate-0"
+                }`}
         >
             <path
                 d="m6 9 6 6 6-6"
@@ -300,161 +298,6 @@ function CollapseIcon({ collapsed }) {
 }
 
 // ======================================================
-// PROFILE SECTION
-// ======================================================
-
-function ProfileSection({
-    user,
-    activeCustomer,
-    onLogout,
-    collapsed,
-}) {
-    const [open, setOpen] = useState(false);
-    const menuRef = useRef(null);
-
-    useEffect(() => {
-        if (!open) return;
-
-        const handleClickOutside = (event) => {
-            if (
-                menuRef.current &&
-                !menuRef.current.contains(event.target)
-            ) {
-                setOpen(false);
-            }
-        };
-
-        document.addEventListener(
-            "mousedown",
-            handleClickOutside
-        );
-
-        return () => {
-            document.removeEventListener(
-                "mousedown",
-                handleClickOutside
-            );
-        };
-    }, [open]);
-
-    if (!user) return null;
-
-    const roleBadge = getRoleBadgeStyle(user.role);
-    const isAdmin =
-        user.role?.toLowerCase() === "admin";
-
-    return (
-        <div
-            className="relative mt-auto border-t p-3"
-            style={{ borderColor: "#EAECF0" }}
-            ref={menuRef}
-        >
-            {/* Profile Button */}
-
-            <button
-                type="button"
-                onClick={() => setOpen((prev) => !prev)}
-                className={`flex w-full items-center rounded-xl transition-all duration-200 ${collapsed
-                    ? "justify-center p-2"
-                    : "gap-3 px-2 py-2"
-                    }`}
-                style={{
-                    background: open ? "#F5F6FA" : "transparent",
-                }}
-            >
-                {/* Avatar */}
-
-                <div className="relative shrink-0">
-                    <div
-                        className="flex h-10 w-10 items-center justify-center rounded-full text-xs font-bold"
-                        style={{
-                            background:
-                                "linear-gradient(135deg, #101B3D 0%, #253761 100%)",
-                            color: "#F5A524",
-                        }}
-                    >
-                        {getInitials(user.name)}
-                    </div>
-
-                    {activeCustomer && (
-                        <span
-                            className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white"
-                            style={{
-                                background: "#12B76A",
-                            }}
-                            title={`Active customer: ${activeCustomer.name}`}
-                        />
-                    )}
-                </div>
-
-                {!collapsed && (
-                    <>
-                        <div className="min-w-0 flex-1 text-left">
-                            <div
-                                className="truncate text-sm font-semibold"
-                                style={{ color: "#101828" }}
-                            >
-                                {user.name}
-                            </div>
-
-                            <span
-                                className="mt-0.5 inline-block rounded-full px-1.5 py-[1px] text-[10px] font-semibold"
-                                style={{
-                                    background: roleBadge.bg,
-                                    color: roleBadge.color,
-                                }}
-                            >
-                                {roleBadge.label}
-                            </span>
-                        </div>
-
-                        <ChevronIcon open={open} />
-                    </>
-                )}
-            </button>
-
-            {/* Collapsed Profile Popup */}
-
-            {open && collapsed && (
-                <div
-                    className="absolute bottom-3 left-[calc(100%+10px)] z-[100] w-72 overflow-hidden rounded-2xl border bg-white shadow-2xl"
-                    style={{
-                        borderColor: "#EAECF0",
-                    }}
-                >
-                    <ProfileDropdownContent
-                        user={user}
-                        activeCustomer={activeCustomer}
-                        isAdmin={isAdmin}
-                        onLogout={onLogout}
-                        closeMenu={() => setOpen(false)}
-                    />
-                </div>
-            )}
-
-            {/* Normal Profile Popup */}
-
-            {open && !collapsed && (
-                <div
-                    className="absolute bottom-[calc(100%+8px)] left-3 right-3 z-[100] overflow-hidden rounded-2xl border bg-white shadow-2xl"
-                    style={{
-                        borderColor: "#EAECF0",
-                    }}
-                >
-                    <ProfileDropdownContent
-                        user={user}
-                        activeCustomer={activeCustomer}
-                        isAdmin={isAdmin}
-                        onLogout={onLogout}
-                        closeMenu={() => setOpen(false)}
-                    />
-                </div>
-            )}
-        </div>
-    );
-}
-
-// ======================================================
 // PROFILE DROPDOWN CONTENT
 // ======================================================
 
@@ -469,8 +312,6 @@ function ProfileDropdownContent({
 
     return (
         <>
-            {/* User Header */}
-
             <div
                 className="flex items-center gap-3 border-b p-4"
                 style={{ borderColor: "#EAECF0" }}
@@ -491,7 +332,7 @@ function ProfileDropdownContent({
                         className="truncate text-sm font-semibold"
                         style={{ color: "#101828" }}
                     >
-                        {user.name}
+                        {user.name || "User"}
                     </div>
 
                     {user.email && (
@@ -515,8 +356,6 @@ function ProfileDropdownContent({
                 </div>
             </div>
 
-            {/* Active Customer */}
-
             {activeCustomer && (
                 <div
                     className="border-b p-4"
@@ -534,16 +373,14 @@ function ProfileDropdownContent({
                         className="text-sm font-semibold"
                         style={{ color: "#101828" }}
                     >
-                        {activeCustomer.name ||
-                            "Walk-in Customer"}
+                        {activeCustomer.name || "Walk-in Customer"}
                     </div>
 
                     <div
                         className="mt-0.5 text-xs"
                         style={{ color: "#667085" }}
                     >
-                        {activeCustomer.phone ||
-                            "No phone on file"}
+                        {activeCustomer.phone || "No phone on file"}
                     </div>
 
                     {activeCustomer.email && (
@@ -556,8 +393,6 @@ function ProfileDropdownContent({
                     )}
                 </div>
             )}
-
-            {/* Actions */}
 
             <div className="p-1.5">
                 {isAdmin && (
@@ -582,7 +417,6 @@ function ProfileDropdownContent({
                                 strokeLinejoin="round"
                             />
                         </svg>
-
                         Admin Panel
                     </Link>
                 )}
@@ -605,6 +439,144 @@ function ProfileDropdownContent({
 }
 
 // ======================================================
+// PROFILE SECTION
+// ======================================================
+
+function ProfileSection({
+    user,
+    activeCustomer,
+    onLogout,
+    collapsed,
+}) {
+    const [open, setOpen] = useState(false);
+    const menuRef = useRef(null);
+
+    useEffect(() => {
+        if (!open) return;
+
+        const handleClickOutside = (event) => {
+            if (
+                menuRef.current &&
+                !menuRef.current.contains(event.target)
+            ) {
+                setOpen(false);
+            }
+        };
+
+        document.addEventListener("mousedown", handleClickOutside);
+
+        return () => {
+            document.removeEventListener(
+                "mousedown",
+                handleClickOutside
+            );
+        };
+    }, [open]);
+
+    if (!user) return null;
+
+    const roleBadge = getRoleBadgeStyle(user.role);
+    const isAdmin =
+        String(user.role || "").toLowerCase() === "admin";
+
+    return (
+        <div
+            ref={menuRef}
+            className="relative mt-auto border-t p-3"
+            style={{ borderColor: "#EAECF0" }}
+        >
+            <button
+                type="button"
+                onClick={() => setOpen((prev) => !prev)}
+                className={`flex w-full items-center rounded-xl transition-all duration-200 ${collapsed
+                    ? "justify-center p-2"
+                    : "gap-3 px-2 py-2"
+                    }`}
+                style={{
+                    background: open ? "#F5F6FA" : "transparent",
+                }}
+            >
+                <div className="relative shrink-0">
+                    <div
+                        className="flex h-10 w-10 items-center justify-center rounded-full text-xs font-bold"
+                        style={{
+                            background:
+                                "linear-gradient(135deg, #101B3D 0%, #253761 100%)",
+                            color: "#F5A524",
+                        }}
+                    >
+                        {getInitials(user.name)}
+                    </div>
+
+                    {activeCustomer && (
+                        <span
+                            className="absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-white"
+                            style={{ background: "#12B76A" }}
+                            title={`Active customer: ${activeCustomer.name}`}
+                        />
+                    )}
+                </div>
+
+                {!collapsed && (
+                    <>
+                        <div className="min-w-0 flex-1 text-left">
+                            <div
+                                className="truncate text-sm font-semibold"
+                                style={{ color: "#101828" }}
+                            >
+                                {user.name || "User"}
+                            </div>
+
+                            <span
+                                className="mt-0.5 inline-block rounded-full px-1.5 py-[1px] text-[10px] font-semibold"
+                                style={{
+                                    background: roleBadge.bg,
+                                    color: roleBadge.color,
+                                }}
+                            >
+                                {roleBadge.label}
+                            </span>
+                        </div>
+
+                        <ChevronIcon open={open} />
+                    </>
+                )}
+            </button>
+
+            {open && collapsed && (
+                <div
+                    className="absolute bottom-3 left-[calc(100%+10px)] z-[100] w-72 overflow-hidden rounded-2xl border bg-white shadow-2xl"
+                    style={{ borderColor: "#EAECF0" }}
+                >
+                    <ProfileDropdownContent
+                        user={user}
+                        activeCustomer={activeCustomer}
+                        isAdmin={isAdmin}
+                        onLogout={onLogout}
+                        closeMenu={() => setOpen(false)}
+                    />
+                </div>
+            )}
+
+            {open && !collapsed && (
+                <div
+                    className="absolute bottom-[calc(100%+8px)] left-3 right-3 z-[100] overflow-hidden rounded-2xl border bg-white shadow-2xl"
+                    style={{ borderColor: "#EAECF0" }}
+                >
+                    <ProfileDropdownContent
+                        user={user}
+                        activeCustomer={activeCustomer}
+                        isAdmin={isAdmin}
+                        onLogout={onLogout}
+                        closeMenu={() => setOpen(false)}
+                    />
+                </div>
+            )}
+        </div>
+    );
+}
+
+// ======================================================
 // SIDEBAR
 // ======================================================
 
@@ -613,34 +585,72 @@ export default function Sidebar() {
     const router = useRouter();
 
     const [user, setUser] = useState(null);
-    const [activeCustomer, setActiveCustomerState] =
-        useState(null);
-
-    // Desktop sidebar collapsed
+    const [activeCustomer, setActiveCustomerState] = useState(null);
     const [collapsed, setCollapsed] = useState(false);
-
-    // Mobile drawer
     const [mobileOpen, setMobileOpen] = useState(false);
-
-    // Notification
-    const [notificationOpen, setNotificationOpen] =
-        useState(false);
+    const [notificationOpen, setNotificationOpen] = useState(false);
 
     const hideSidebar =
-        pathname === "/login" ||
-        pathname === "/register";
+        pathname === "/login" || pathname === "/register";
 
-    // ====================================================
+    // ==================================================
+    // BODY SPACING
+    // IMPORTANT:
+    // No styled-jsx here.
+    // This prevents jsx-* hydration mismatch.
+    // ==================================================
+
+    useEffect(() => {
+        if (hideSidebar) {
+            document.body.style.paddingLeft = "";
+            document.body.style.paddingTop = "";
+            document.body.style.transition = "";
+
+            return;
+        }
+
+        const updateBodySpacing = () => {
+            if (window.innerWidth >= 1024) {
+                document.body.style.paddingLeft = collapsed
+                    ? "78px"
+                    : "260px";
+
+                document.body.style.paddingTop = "";
+                document.body.style.transition =
+                    "padding-left 300ms ease";
+            } else {
+                document.body.style.paddingLeft = "";
+                document.body.style.paddingTop = "64px";
+                document.body.style.transition = "";
+            }
+        };
+
+        updateBodySpacing();
+
+        window.addEventListener("resize", updateBodySpacing);
+
+        return () => {
+            window.removeEventListener(
+                "resize",
+                updateBodySpacing
+            );
+
+            document.body.style.paddingLeft = "";
+            document.body.style.paddingTop = "";
+            document.body.style.transition = "";
+        };
+    }, [collapsed, hideSidebar]);
+
+    // ==================================================
     // FETCH USER
-    // ====================================================
+    // ==================================================
 
     useEffect(() => {
         if (hideSidebar) return;
 
         let mounted = true;
 
-        api
-            .get("/auth/me")
+        api.get("/auth/me")
             .then((res) => {
                 if (mounted) {
                     setUser(res.data);
@@ -649,8 +659,7 @@ export default function Sidebar() {
             .catch((error) => {
                 console.error(
                     "User fetch error:",
-                    error.response?.data ||
-                    error.message
+                    error.response?.data || error.message
                 );
 
                 if (mounted) {
@@ -658,9 +667,7 @@ export default function Sidebar() {
                 }
 
                 if (error.response?.status === 401) {
-                    api
-                        .post("/auth/logout")
-                        .catch(() => { });
+                    api.post("/auth/logout").catch(() => { });
                 }
             });
 
@@ -669,36 +676,49 @@ export default function Sidebar() {
         };
     }, [hideSidebar]);
 
-    // ====================================================
+    // ==================================================
     // ACTIVE CUSTOMER
-    // ====================================================
+    // ==================================================
 
     useEffect(() => {
         if (hideSidebar) return;
 
-        setActiveCustomerState(
-            getActiveCustomer()
+        try {
+            setActiveCustomerState(getActiveCustomer());
+        } catch (error) {
+            console.error(
+                "Active customer read error:",
+                error
+            );
+
+            setActiveCustomerState(null);
+        }
+
+        const unsubscribe = subscribeActiveCustomer(
+            (customer) => {
+                setActiveCustomerState(customer);
+            }
         );
 
-        const unsubscribe =
-            subscribeActiveCustomer((customer) => {
-                setActiveCustomerState(customer);
-            });
-
-        return unsubscribe;
+        return () => {
+            if (typeof unsubscribe === "function") {
+                unsubscribe();
+            }
+        };
     }, [hideSidebar]);
 
-    // ====================================================
-    // CLOSE MOBILE SIDEBAR ON ROUTE CHANGE
-    // ====================================================
+    // ==================================================
+    // ROUTE CHANGE
+    // ==================================================
 
     useEffect(() => {
         setMobileOpen(false);
+        setNotificationOpen(false);
     }, [pathname]);
 
-    // ====================================================
+    // ==================================================
     // ESC KEY
-    // ====================================================
+    // ==================================================
 
     useEffect(() => {
         const handleKeyDown = (event) => {
@@ -721,9 +741,9 @@ export default function Sidebar() {
         };
     }, []);
 
-    // ====================================================
-    // PREVENT BODY SCROLL ON MOBILE
-    // ====================================================
+    // ==================================================
+    // BODY SCROLL LOCK
+    // ==================================================
 
     useEffect(() => {
         if (mobileOpen) {
@@ -737,9 +757,9 @@ export default function Sidebar() {
         };
     }, [mobileOpen]);
 
-    // ====================================================
+    // ==================================================
     // LOGOUT
-    // ====================================================
+    // ==================================================
 
     const handleLogout = async () => {
         try {
@@ -747,8 +767,7 @@ export default function Sidebar() {
         } catch (error) {
             console.error(
                 "Logout error:",
-                error.response?.data ||
-                error.message
+                error.response?.data || error.message
             );
         } finally {
             setUser(null);
@@ -761,20 +780,16 @@ export default function Sidebar() {
         return null;
     }
 
-    // ====================================================
-    // NAV CONTENT
-    // ====================================================
+    // ==================================================
+    // NAVIGATION
+    // ==================================================
 
-    const NavigationContent = ({
-        mobile = false,
-    }) => (
+    const NavigationContent = ({ mobile = false }) => (
         <div className="space-y-1">
             {navLinks.map((link) => {
                 const active =
                     pathname === link.href ||
-                    pathname.startsWith(
-                        link.href + "/"
-                    );
+                    pathname.startsWith(link.href + "/");
 
                 return (
                     <Link
@@ -800,14 +815,11 @@ export default function Sidebar() {
                             background: active
                                 ? "#F5F6FA"
                                 : "transparent",
-
                             color: active
                                 ? "#101B3D"
                                 : "#667085",
                         }}
                     >
-                        {/* Active Indicator */}
-
                         {active && (
                             <span
                                 className="absolute left-0 top-1/2 h-7 w-1 -translate-y-1/2 rounded-r-full"
@@ -816,8 +828,6 @@ export default function Sidebar() {
                                 }}
                             />
                         )}
-
-                        {/* Icon */}
 
                         <span
                             className="shrink-0 transition-transform duration-200 group-hover:scale-110"
@@ -829,8 +839,6 @@ export default function Sidebar() {
                         >
                             {link.icon}
                         </span>
-
-                        {/* Text */}
 
                         {(!collapsed || mobile) && (
                             <div className="min-w-0 flex-1">
@@ -849,8 +857,6 @@ export default function Sidebar() {
                             </div>
                         )}
 
-                        {/* Active Dot */}
-
                         {active &&
                             (!collapsed || mobile) && (
                                 <span
@@ -860,8 +866,6 @@ export default function Sidebar() {
                                     }}
                                 />
                             )}
-
-                        {/* Tooltip */}
 
                         {collapsed && !mobile && (
                             <span className="pointer-events-none absolute left-[calc(100%+10px)] z-50 hidden whitespace-nowrap rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white shadow-lg group-hover:block">
@@ -874,19 +878,15 @@ export default function Sidebar() {
         </div>
     );
 
-    // ====================================================
-    // SIDEBAR UI
-    // ====================================================
+    // ==================================================
+    // UI
+    // ==================================================
 
     return (
         <>
-            {/* ================================================
-          MOBILE TOP BAR
-      ================================================= */}
+            {/* MOBILE TOP BAR */}
 
             <header className="fixed left-0 right-0 top-0 z-40 flex h-16 items-center justify-between border-b bg-white px-4 shadow-sm lg:hidden">
-                {/* Logo */}
-
                 <Link
                     href="/billing"
                     className="flex items-center gap-2.5"
@@ -926,11 +926,7 @@ export default function Sidebar() {
                     </div>
                 </Link>
 
-                {/* Mobile Actions */}
-
                 <div className="flex items-center gap-1">
-                    {/* Notification */}
-
                     <button
                         type="button"
                         onClick={() =>
@@ -952,8 +948,6 @@ export default function Sidebar() {
                         />
                     </button>
 
-                    {/* Menu */}
-
                     <button
                         type="button"
                         onClick={() =>
@@ -962,9 +956,7 @@ export default function Sidebar() {
                             )
                         }
                         className="flex h-10 w-10 items-center justify-center rounded-xl hover:bg-slate-50"
-                        style={{
-                            color: "#101828",
-                        }}
+                        style={{ color: "#101828" }}
                         aria-label="Toggle sidebar"
                         aria-expanded={mobileOpen}
                     >
@@ -977,9 +969,7 @@ export default function Sidebar() {
                 </div>
             </header>
 
-            {/* ================================================
-          MOBILE OVERLAY
-      ================================================= */}
+            {/* MOBILE OVERLAY */}
 
             {mobileOpen && (
                 <div
@@ -990,9 +980,7 @@ export default function Sidebar() {
                 />
             )}
 
-            {/* ================================================
-          MOBILE SIDEBAR
-      ================================================= */}
+            {/* MOBILE SIDEBAR */}
 
             <aside
                 className={`fixed bottom-0 left-0 top-0 z-50 w-[285px] border-r bg-white shadow-2xl transition-transform duration-300 lg:hidden ${mobileOpen
@@ -1003,8 +991,6 @@ export default function Sidebar() {
                     borderColor: "#EAECF0",
                 }}
             >
-                {/* Mobile Sidebar Header */}
-
                 <div
                     className="flex h-16 items-center justify-between border-b px-4"
                     style={{
@@ -1069,12 +1055,11 @@ export default function Sidebar() {
                             setMobileOpen(false)
                         }
                         className="flex h-9 w-9 items-center justify-center rounded-lg hover:bg-slate-50"
+                        aria-label="Close sidebar"
                     >
                         <CloseIcon />
                     </button>
                 </div>
-
-                {/* Mobile Navigation */}
 
                 <div className="flex h-[calc(100%-64px)] flex-col overflow-y-auto p-3">
                     <div
@@ -1087,8 +1072,6 @@ export default function Sidebar() {
                     </div>
 
                     <NavigationContent mobile />
-
-                    {/* Mobile Customer */}
 
                     {activeCustomer && (
                         <div
@@ -1132,18 +1115,14 @@ export default function Sidebar() {
 
                     <ProfileSection
                         user={user}
-                        activeCustomer={
-                            activeCustomer
-                        }
+                        activeCustomer={activeCustomer}
                         onLogout={handleLogout}
                         collapsed={false}
                     />
                 </div>
             </aside>
 
-            {/* ================================================
-          DESKTOP SIDEBAR
-      ================================================= */}
+            {/* DESKTOP SIDEBAR */}
 
             <aside
                 className={`fixed bottom-0 left-0 top-0 z-40 hidden border-r bg-white transition-all duration-300 lg:flex lg:flex-col ${collapsed
@@ -1156,8 +1135,6 @@ export default function Sidebar() {
                         "4px 0 20px rgba(16,24,40,0.04)",
                 }}
             >
-                {/* Logo */}
-
                 <div
                     className={`flex h-[72px] shrink-0 items-center border-b ${collapsed
                         ? "justify-center px-2"
@@ -1224,8 +1201,6 @@ export default function Sidebar() {
                     </Link>
                 </div>
 
-                {/* Navigation */}
-
                 <div className="flex-1 overflow-y-auto p-3">
                     {!collapsed && (
                         <div
@@ -1239,8 +1214,6 @@ export default function Sidebar() {
                     )}
 
                     <NavigationContent />
-
-                    {/* Quick Customer */}
 
                     {activeCustomer && !collapsed && (
                         <div
@@ -1283,7 +1256,7 @@ export default function Sidebar() {
                     )}
                 </div>
 
-                {/* Notification */}
+                {/* NOTIFICATIONS */}
 
                 <div
                     className={`border-t p-3 ${collapsed
@@ -1351,7 +1324,7 @@ export default function Sidebar() {
                     </button>
                 </div>
 
-                {/* Profile */}
+                {/* PROFILE */}
 
                 <ProfileSection
                     user={user}
@@ -1360,7 +1333,7 @@ export default function Sidebar() {
                     collapsed={collapsed}
                 />
 
-                {/* Collapse Button */}
+                {/* COLLAPSE */}
 
                 <div
                     className={`border-t p-3 ${collapsed
@@ -1404,30 +1377,7 @@ export default function Sidebar() {
                 </div>
             </aside>
 
-            {/* ================================================
-          DESKTOP CONTENT SPACING
-      ================================================= */}
-
-            <style jsx global>{`
-        @media (min-width: 1024px) {
-          body {
-            padding-left: ${collapsed
-                    ? "78px"
-                    : "260px"};
-            transition: padding-left 300ms ease;
-          }
-        }
-
-        @media (max-width: 1023px) {
-          body {
-            padding-top: 64px;
-          }
-        }
-      `}</style>
-
-            {/* ================================================
-          NOTIFICATION PANEL
-      ================================================= */}
+            {/* NOTIFICATION PANEL */}
 
             {notificationOpen && (
                 <>
@@ -1495,7 +1445,8 @@ export default function Sidebar() {
                                     <div
                                         className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full"
                                         style={{
-                                            background: "#FEF3C7",
+                                            background:
+                                                "#FEF3C7",
                                             color: "#92400E",
                                         }}
                                     >
