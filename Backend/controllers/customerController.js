@@ -5,8 +5,7 @@ import Customer from "../models/Customer.js";
 // ===============================
 export const getCustomers = async (req, res) => {
   try {
-    const customers = await Customer.find()
-      .sort({ createdAt: -1 });
+    const customers = await Customer.find().sort({ createdAt: -1 });
 
     res.status(200).json(customers);
   } catch (err) {
@@ -50,12 +49,28 @@ export const createCustomer = async (req, res) => {
   try {
     const { name, phone, email, address } = req.body;
 
+    // Required fields
     if (!name || !phone) {
       return res.status(400).json({
         message: "Name or phone number required",
       });
     }
 
+    // ==========================================
+    // CHECK DUPLICATE PHONE
+    // ==========================================
+    const existingCustomer = await Customer.findOne({ phone });
+
+    if (existingCustomer) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer with this phone number already exists!",
+      });
+    }
+
+    // ==========================================
+    // CREATE CUSTOMER
+    // ==========================================
     const customer = await Customer.create({
       name,
       phone,
@@ -63,12 +78,28 @@ export const createCustomer = async (req, res) => {
       address: address || "",
     });
 
-    res.status(201).json(customer);
+    res.status(201).json({
+      success: true,
+      message: "Customer added successfully",
+      customer,
+    });
+
   } catch (err) {
     console.error("Create customer error:", err);
 
-    res.status(400).json({
-      message: err.message,
+    // ==========================================
+    // MONGODB DUPLICATE KEY ERROR
+    // ==========================================
+    if (err.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: "Customer with this phone number already exists",
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Customer create nahi ho paaya",
     });
   }
 };
@@ -79,6 +110,21 @@ export const createCustomer = async (req, res) => {
 export const updateCustomer = async (req, res) => {
   try {
     const { name, phone, email, address } = req.body;
+
+    // ==========================================
+    // CHECK DUPLICATE PHONE DURING UPDATE
+    // ==========================================
+    const existingCustomer = await Customer.findOne({
+      phone,
+      _id: { $ne: req.params.id },
+    });
+
+    if (existingCustomer) {
+      return res.status(400).json({
+        success: false,
+        message: "Another customer already has this phone number",
+      });
+    }
 
     const customer = await Customer.findByIdAndUpdate(
       req.params.id,
@@ -100,12 +146,26 @@ export const updateCustomer = async (req, res) => {
       });
     }
 
-    res.status(200).json(customer);
+    res.status(200).json({
+      success: true,
+      message: "Customer updated successfully",
+      customer,
+    });
+
   } catch (err) {
     console.error("Update customer error:", err);
 
-    res.status(400).json({
-      message: err.message,
+    // MongoDB duplicate key protection
+    if (err.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: "Another customer already has this phone number",
+      });
+    }
+
+    res.status(500).json({
+      success: false,
+      message: "Customer update nahi ho paaya",
     });
   }
 };
@@ -115,9 +175,7 @@ export const updateCustomer = async (req, res) => {
 // ===============================
 export const deleteCustomer = async (req, res) => {
   try {
-    const customer = await Customer.findByIdAndDelete(
-      req.params.id
-    );
+    const customer = await Customer.findByIdAndDelete(req.params.id);
 
     if (!customer) {
       return res.status(404).json({
@@ -126,8 +184,10 @@ export const deleteCustomer = async (req, res) => {
     }
 
     res.status(200).json({
+      success: true,
       message: "Customer deleted successfully",
     });
+
   } catch (err) {
     console.error("Delete customer error:", err);
 
