@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { jwtVerify } from "jose";
 
 // Ye routes bina login ke accessible honge
-const publicRoutes = ["/login", "/register"];
+const publicRoutes = ["/login", "/register", "/forgot-password"];
 
 function normalizePath(pathname) {
   if (pathname.length > 1 && pathname.endsWith("/")) {
@@ -11,16 +11,25 @@ function normalizePath(pathname) {
   return pathname;
 }
 
-// Token ka signature + expiry verify karta hai — sirf existence nahi
+// Token verify function
 async function isTokenValid(token) {
   if (!token) return false;
 
+  const secretKey = process.env.JWT_SECRET;
+
+  // Agar env me JWT_SECRET nahi mila toh warning dega
+  if (!secretKey) {
+    console.warn("⚠️ Warning: JWT_SECRET environment variable is missing!");
+    // Agar secret nahi hai toh sirf token check karega (emergency fallback)
+    return Boolean(token);
+  }
+
   try {
-    const secret = new TextEncoder().encode(process.env.JWT_SECRET);
+    const secret = new TextEncoder().encode(secretKey);
     await jwtVerify(token, secret);
     return true;
-  } catch {
-    // Signature galat, ya expire ho chuka, ya corrupt token
+  } catch (err) {
+    console.error("Middleware JWT Verification Error:", err.message);
     return false;
   }
 }
@@ -34,23 +43,26 @@ export async function middleware(request) {
 
   const validToken = await isTokenValid(token);
 
-  // Root pe koi bhi aaye → seedha sahi jagah bhejo
+  // 1. Root ("/") par aaye toh
   if (isRoot) {
     const destination = validToken ? "/billing" : "/login";
     return NextResponse.redirect(new URL(destination, request.url));
   }
 
-  // Valid token nahi hai aur protected route khol raha hai → login page pe bhejo
+  // 2. Token nahi hai aur protected route access kar raha hai
   if (!validToken && !isPublicRoute) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("redirect", pathname);
     const response = NextResponse.redirect(loginUrl);
-    // Stale/invalid cookie yahin se clear kar do, taaki dubara loop na bane
-    response.cookies.delete("token");
+
+    // Sirf tab delete karo agar galat token present tha
+    if (token) {
+      response.cookies.delete("token");
+    }
     return response;
   }
 
-  // Valid token hai lekin login/register page pe ja raha hai → billing pe bhej do
+  // 3. Valid token hai aur login/register par ja raha hai -> /billing bhejo
   if (validToken && isPublicRoute) {
     return NextResponse.redirect(new URL("/billing", request.url));
   }
@@ -63,61 +75,3 @@ export const config = {
     "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
   ],
 };
-
-
-
-
-
-
-// import { NextResponse } from "next/server";
-
-// // Ye routes bina login ke accessible honge
-// const publicRoutes = ["/login", "/register"];
-
-// function normalizePath(pathname) {
-//   // trailing slash hata do (root "/" ko chhod kar) taaki "/login/" bhi match ho
-//   if (pathname.length > 1 && pathname.endsWith("/")) {
-//     return pathname.slice(0, -1);
-//   }
-//   return pathname;
-// }
-
-// export function middleware(request) {
-//   const token = request.cookies.get("token")?.value;
-//   const pathname = normalizePath(request.nextUrl.pathname);
-
-//   const isPublicRoute = publicRoutes.includes(pathname);
-//   const isRoot = pathname === "/";
-
-//   // Root pe koi bhi aaye (mobile tab, desktop, fresh open) → seedha sahi jagah bhejo
-//   if (isRoot) {
-//     const destination = token ? "/billing" : "/login";
-//     return NextResponse.redirect(new URL(destination, request.url));
-//   }
-
-//   // Login nahi hai aur protected route khol raha hai → login page pe bhejo
-//   if (!token && !isPublicRoute) {
-//     const loginUrl = new URL("/login", request.url);
-//     loginUrl.searchParams.set("redirect", pathname); // login ke baad wapas yahi bhejne ke liye
-//     return NextResponse.redirect(loginUrl);
-//   }
-
-//   // Login hai lekin login/register page pe ja raha hai → billing pe bhej do
-//   if (token && isPublicRoute) {
-//     return NextResponse.redirect(new URL("/billing", request.url));
-//   }
-
-//   return NextResponse.next();
-// }
-
-// // Matcher — kaunse paths pe ye middleware chalega
-// export const config = {
-//   matcher: [
-//     /*
-//      * Sab paths pe chalega EXCEPT:
-//      * - api routes
-//      * - static files (_next, favicon, images, common asset extensions)
-//      */
-//     "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
-//   ],
-// };

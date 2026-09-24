@@ -41,5 +41,8 @@ cmd open and check ip address:-ipconfig
 
 ip address:http://10.122.237.144:3000
 
- admin login -> admin@admin.com
- password -> 12345678
+admin ka h
+ {
+    "email":"admin@admin.com",
+    "password":"123456"
+    }

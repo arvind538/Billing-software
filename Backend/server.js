@@ -18,10 +18,25 @@ connectDB();
 
 const app = express();
 
+// Allowed origins list (trailing slash issue se bachne ke liye)
+const allowedOrigins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    process.env.FRONTEND_URI?.replace(/\/$/, ""), // aakhri ka '/' remove karega agar ho toh
+].filter(Boolean);
+
 app.use(
     cors({
-        origin: process.env.FRONTEND_URI,
-        methods: ["GET", "POST", "PUT", "DELETE", "PATCH"],
+        origin: (origin, callback) => {
+            // Allow requests with no origin (like Postman or server-to-server)
+            if (!origin || allowedOrigins.includes(origin)) {
+                callback(null, true);
+            } else {
+                callback(new Error(`CORS blocked: ${origin} not allowed`));
+            }
+        },
+        methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+        allowedHeaders: ["Content-Type", "Authorization"],
         credentials: true,
     })
 );
@@ -29,6 +44,7 @@ app.use(
 app.use(express.json());
 app.use(cookieParser());
 
+// Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/customers", customerRoutes);
@@ -37,8 +53,14 @@ app.use("/api/admin", adminRoutes);
 
 app.get("/", (req, res) => res.send("Billing API running"));
 
+// Global error handler (isse server crash hone se bachega)
+app.use((err, req, res, next) => {
+    console.error("Backend Error:", err.message);
+    res.status(500).json({ error: err.message || "Internal Server Error" });
+});
+
 const PORT = process.env.PORT || 5000;
 
-app.listen(5000, "0.0.0.0", () => {
-    console.log("Server running on http://10.107.21.144:5000");
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
 });

@@ -2,9 +2,9 @@
 const nextConfig = {
   /* config options here */
   reactCompiler: true,
-  output: 'export',
+  // output: 'export',
 
-  allowedDevOrigins: ["10.107.21.144"],
+
 
 };
 

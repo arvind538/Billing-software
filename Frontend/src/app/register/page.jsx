@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import api from "@/lib/api";
@@ -103,7 +103,6 @@ function SuccessScreen() {
               transform: scale(0.6);
               opacity: 0;
             }
-
             100% {
               transform: scale(1);
               opacity: 1;
@@ -114,7 +113,6 @@ function SuccessScreen() {
             0% {
               width: 0%;
             }
-
             100% {
               width: 100%;
             }
@@ -128,50 +126,44 @@ function SuccessScreen() {
 export default function RegisterPage() {
   const router = useRouter();
 
-  // =========================
   // FORM STATES
-  // =========================
-
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-
-  // Admin / Cashier role
   const [role, setRole] = useState("cashier");
-
   const [showPassword, setShowPassword] = useState(false);
 
-  // =========================
   // UI STATES
-  // =========================
-
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
 
-  // =========================
-  // REGISTER FUNCTION
-  // =========================
+  // Auto redirect cleanup
+  useEffect(() => {
+    let timer;
+    if (success) {
+      timer = setTimeout(() => {
+        router.push("/login");
+      }, 1800);
+    }
+    return () => clearTimeout(timer);
+  }, [success, router]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-
     setError("");
 
-    // Name validation
     if (!name.trim()) {
       setError("Please enter your name.");
       return;
     }
 
-    // Email validation
     if (!email.trim()) {
       setError("Please enter your email.");
       return;
     }
 
-    // Password validation
     if (!password) {
       setError("Please enter a password.");
       return;
@@ -182,13 +174,11 @@ export default function RegisterPage() {
       return;
     }
 
-    // Confirm password validation
     if (password !== confirmPassword) {
       setError("Passwords do not match.");
       return;
     }
 
-    // Role validation
     if (!role) {
       setError("Please select a role.");
       return;
@@ -197,66 +187,59 @@ export default function RegisterPage() {
     setLoading(true);
 
     try {
-      // =========================
-      // REGISTER API
-      // =========================
-
       const response = await api.post("/auth/register", {
         name: name.trim(),
-        email: email.trim(),
+        email: email.trim().toLowerCase(),
         password,
         role,
       });
 
-      console.log("Register response:", response.data);
+      // Agar backend direct register pe token return kar raha ho to save karein
+      const token =
+        response.data?.token ||
+        response.data?.accessToken ||
+        response.data?.data?.token;
+
+      if (token) {
+        localStorage.setItem("token", token);
+      }
 
       toast.success("Account created successfully!");
-
       setSuccess(true);
-
-      // Login page redirect
-      setTimeout(() => {
-        router.push("/login");
-      }, 2000);
     } catch (err) {
       console.error(
         "Registration error:",
         err?.response?.data || err.message
       );
 
-      const message =
-        err?.response?.data?.message ||
-        err?.response?.data?.error ||
-        "Registration failed. Please try again.";
+      let message = "Registration failed. Please try again.";
+
+      if (!err.response) {
+        // Backend band ho ya CORS error aaye
+        message = "Cannot connect to server. Please check your backend connection.";
+      } else if (err.response.data?.message) {
+        message = err.response.data.message;
+      } else if (err.response.data?.error) {
+        message = err.response.data.error;
+      }
 
       setError(message);
       toast.error(message);
-
+    } finally {
       setLoading(false);
     }
   };
 
-  // =========================
-  // SUCCESS SCREEN
-  // =========================
-
   if (success) {
     return <SuccessScreen />;
   }
-
-  // =========================
-  // REGISTER PAGE
-  // =========================
 
   return (
     <div
       className="flex min-h-screen w-full flex-col lg:flex-row-reverse"
       style={{ background: "#FFFFFF" }}
     >
-      {/* =========================================
-          BRAND PANEL
-      ========================================= */}
-
+      {/* BRAND PANEL */}
       <div
         className="relative flex w-full flex-col justify-between overflow-hidden px-8 py-8 lg:w-[46%] lg:px-14 lg:py-14"
         style={{
@@ -264,7 +247,6 @@ export default function RegisterPage() {
           color: "#FFFFFF",
         }}
       >
-        {/* Background Grid */}
         <div
           className="pointer-events-none absolute inset-0 opacity-[0.04]"
           style={{
@@ -274,7 +256,6 @@ export default function RegisterPage() {
           }}
         />
 
-        {/* Logo */}
         <div className="relative z-10 flex items-center gap-2">
           <span
             className="flex h-8 w-8 items-center justify-center rounded-full font-display text-sm font-semibold"
@@ -291,7 +272,6 @@ export default function RegisterPage() {
           </span>
         </div>
 
-        {/* Brand Content */}
         <div className="relative z-10 hidden lg:block">
           <h1
             className="font-display text-3xl font-medium leading-tight"
@@ -312,10 +292,7 @@ export default function RegisterPage() {
         </div>
       </div>
 
-      {/* =========================================
-          FORM PANEL
-      ========================================= */}
-
+      {/* FORM PANEL */}
       <div className="flex flex-1 items-center justify-center px-6 py-12 sm:px-10">
         <form
           onSubmit={handleSubmit}
@@ -325,8 +302,6 @@ export default function RegisterPage() {
             background: "#FFFFFF",
           }}
         >
-          {/* Heading */}
-
           <h2
             className="font-display text-2xl font-semibold"
             style={{ color: "#101828" }}
@@ -341,8 +316,6 @@ export default function RegisterPage() {
             Get started with your billing dashboard.
           </p>
 
-          {/* Error */}
-
           {error && (
             <p
               className="mt-4 rounded-lg px-3 py-2 text-sm"
@@ -355,10 +328,7 @@ export default function RegisterPage() {
             </p>
           )}
 
-          {/* =========================================
-              NAME
-          ========================================= */}
-
+          {/* NAME */}
           <label
             className="mt-6 block text-xs font-medium"
             style={{ color: "#101828" }}
@@ -372,7 +342,6 @@ export default function RegisterPage() {
             value={name}
             onChange={(e) => setName(e.target.value)}
             required
-            suppressHydrationWarning
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
             style={{
               borderColor: "#E4E7EC",
@@ -381,10 +350,7 @@ export default function RegisterPage() {
             }}
           />
 
-          {/* =========================================
-              EMAIL
-          ========================================= */}
-
+          {/* EMAIL */}
           <label
             className="mt-4 block text-xs font-medium"
             style={{ color: "#101828" }}
@@ -398,7 +364,6 @@ export default function RegisterPage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
-            suppressHydrationWarning
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
             style={{
               borderColor: "#E4E7EC",
@@ -407,10 +372,7 @@ export default function RegisterPage() {
             }}
           />
 
-          {/* =========================================
-              PASSWORD
-          ========================================= */}
-
+          {/* PASSWORD */}
           <label
             className="mt-4 block text-xs font-medium"
             style={{ color: "#101828" }}
@@ -425,7 +387,6 @@ export default function RegisterPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              suppressHydrationWarning
               className="w-full rounded-lg border px-3 py-2.5 pr-10 text-sm outline-none transition focus:ring-[3px]"
               style={{
                 borderColor: "#E4E7EC",
@@ -439,18 +400,13 @@ export default function RegisterPage() {
               onClick={() => setShowPassword((v) => !v)}
               className="absolute right-3 top-1/2 -translate-y-1/2"
               style={{ color: "#667085" }}
-              aria-label={
-                showPassword ? "Hide password" : "Show password"
-              }
+              aria-label={showPassword ? "Hide password" : "Show password"}
             >
               <EyeIcon open={showPassword} />
             </button>
           </div>
 
-          {/* =========================================
-              CONFIRM PASSWORD
-          ========================================= */}
-
+          {/* CONFIRM PASSWORD */}
           <label
             className="mt-4 block text-xs font-medium"
             style={{ color: "#101828" }}
@@ -464,7 +420,6 @@ export default function RegisterPage() {
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             required
-            suppressHydrationWarning
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
             style={{
               borderColor: "#E4E7EC",
@@ -473,10 +428,7 @@ export default function RegisterPage() {
             }}
           />
 
-          {/* =========================================
-              ROLE SELECT
-          ========================================= */}
-
+          {/* ROLE SELECT */}
           <label
             className="mt-4 block text-xs font-medium"
             style={{ color: "#101828" }}
@@ -499,34 +451,25 @@ export default function RegisterPage() {
             <option value="admin">Admin</option>
           </select>
 
-          {/* Selected Role Information */}
-
           <div
             className="mt-2 rounded-lg px-3 py-1 text-xs"
             style={{
-              background:
-                role === "admin" ? "#FFF8E7" : "#F2F4F7",
-              color:
-                role === "admin" ? "#B54708" : "#475467",
+              background: role === "admin" ? "#FFF8E7" : "#F2F4F7",
+              color: role === "admin" ? "#B54708" : "#475467",
             }}
           >
             {role === "admin" ? (
               <>
-                👑 <strong>Admin:</strong> Full access to billing
-                management.
+                👑 <strong>Admin:</strong> Full access to billing management.
               </>
             ) : (
               <>
-                👤 <strong>Cashier:</strong> Billing and customer
-                operations access.
+                👤 <strong>Cashier:</strong> Billing and customer operations access.
               </>
             )}
           </div>
 
-          {/* =========================================
-              CREATE ACCOUNT BUTTON
-          ========================================= */}
-
+          {/* SUBMIT BUTTON */}
           <button
             type="submit"
             disabled={loading}
@@ -539,16 +482,12 @@ export default function RegisterPage() {
             {loading ? "Creating account..." : "Create account"}
           </button>
 
-          {/* =========================================
-              LOGIN LINK
-          ========================================= */}
-
+          {/* LOGIN LINK */}
           <p
             className="mt-6 text-center text-sm"
             style={{ color: "#667085" }}
           >
             Already have an account?{" "}
-
             <Link
               href="/login"
               className="font-medium hover:underline"
