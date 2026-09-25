@@ -18,16 +18,24 @@ connectDB();
 
 const app = express();
 
-app.use(
-    cors({
-        origin: [
-            "https://billing-software-en5c.vercel.app",
-            "http://localhost:3000",
-            "http://localhost:5173"
-        ],
-        credentials: true,
-    })
-);
+
+const allowedOrigins = [
+    'http://localhost:3000',
+    'https://billing-software-en5c.vercel.app' // Aapka Vercel URL
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        // Mobile apps ya curl/postman ke liye (!origin) allow karein
+        if (!origin || allowedOrigins.indexOf(origin) !== -1) {
+            callback(null, true);
+        } else {
+            callback(new Error('Blocked by CORS'));
+        }
+    },
+    credentials: true, // Cookies aur auth headers bhejne ke liye zaroori hai
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS']
+}));
 
 app.use(express.json());
 app.use(cookieParser());
@@ -47,8 +55,9 @@ app.use((err, req, res, next) => {
     res.status(500).json({ error: err.message || "Internal Server Error" });
 });
 
+// Hardcoded 5000 mat rakhein, process.env.PORT use karein
 const PORT = process.env.PORT || 5000;
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
 });

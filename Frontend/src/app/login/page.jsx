@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, Suspense } from "react";
+import { useState, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import api from "@/lib/api";
@@ -35,93 +35,6 @@ function EyeIcon({ open }) {
   );
 }
 
-function InvoiceMockup() {
-  const [stamped, setStamped] = useState(false);
-
-  useEffect(() => {
-    const t = setTimeout(() => setStamped(true), 400);
-    return () => clearTimeout(t);
-  }, []);
-
-  const lineItems = [
-    { label: "Pro plan — monthly", amount: "49.00" },
-    { label: "Add-on seats × 3", amount: "27.00" },
-    { label: "Usage overage", amount: "6.40" },
-  ];
-
-  return (
-    <div
-      className="relative w-full max-w-xs rounded-2xl p-6"
-      style={{
-        background: "#16224D",
-        border: "1px solid rgba(255,255,255,0.08)",
-      }}
-    >
-      <div className="flex items-center justify-between">
-        <span
-          className="text-[11px] uppercase tracking-wider"
-          style={{ color: "#7C89B8" }}
-        >
-          Invoice #INV-0847
-        </span>
-
-        <span
-          className="rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide transition-all duration-500"
-          style={{
-            background: stamped
-              ? "rgba(18,183,106,0.15)"
-              : "transparent",
-            color: "#12B76A",
-            opacity: stamped ? 1 : 0,
-            transform: stamped
-              ? "scale(1) rotate(-4deg)"
-              : "scale(0.7) rotate(-4deg)",
-          }}
-        >
-          Paid
-        </span>
-      </div>
-
-      <div className="mt-5 space-y-3">
-        {lineItems.map((item) => (
-          <div
-            key={item.label}
-            className="flex items-center justify-between text-sm"
-          >
-            <span style={{ color: "#B7C0E0" }}>{item.label}</span>
-
-            <span
-              className="font-display tabular-nums"
-              style={{ color: "#EDF0F9" }}
-            >
-              ${item.amount}
-            </span>
-          </div>
-        ))}
-      </div>
-
-      <div
-        className="mt-4 flex items-center justify-between border-t pt-4"
-        style={{ borderColor: "rgba(255,255,255,0.08)" }}
-      >
-        <span
-          className="text-xs font-medium"
-          style={{ color: "#7C89B8" }}
-        >
-          Total due
-        </span>
-
-        <span
-          className="font-display text-xl font-semibold tabular-nums"
-          style={{ color: "#F5A524" }}
-        >
-          $82.40
-        </span>
-      </div>
-    </div>
-  );
-}
-
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -143,21 +56,17 @@ function LoginForm() {
         password: password,
       });
 
-      // Backend se token aur user details extract karein
       const token =
         response.data?.token ||
         response.data?.accessToken ||
         response.data?.jwt;
 
       if (token) {
-        // 1. LocalStorage me real JWT token aur user payload save karein
         localStorage.setItem("token", token);
         localStorage.setItem("user", JSON.stringify(response.data));
 
-        // 2. Cookie me save karein Next.js Middleware ke liye (7 days expiry)
         document.cookie = `token=${token}; path=/; max-age=604800; SameSite=Lax`;
 
-        // 3. DevTools URL loop se bachate hue clean redirect karein
         const redirectParam = searchParams.get("redirect");
         const safeDestination =
           redirectParam &&
@@ -184,29 +93,14 @@ function LoginForm() {
 
   return (
     <div
-      className="flex min-h-screen w-full flex-col lg:flex-row-reverse"
-      style={{ background: "#FFFFFF" }}
+      className="flex min-h-screen w-full items-center justify-center px-4 py-12"
+      style={{ background: "#F8FAFC" }}
     >
-      {/* Brand panel */}
-      <div
-        className="relative flex w-full flex-col justify-between overflow-hidden px-8 py-8 lg:w-[46%] lg:px-14 lg:py-14"
-        style={{
-          background: "#101B3D",
-          color: "#FFFFFF",
-        }}
-      >
-        <div
-          className="pointer-events-none absolute inset-0 opacity-[0.04]"
-          style={{
-            backgroundImage:
-              "linear-gradient(rgba(255,255,255,1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,1) 1px, transparent 1px)",
-            backgroundSize: "32px 32px",
-          }}
-        />
-
-        <div className="relative z-10 flex items-center gap-2">
+      <div className="w-full max-w-md">
+        {/* Simple Brand Header */}
+        <div className="mb-8 flex items-center justify-center gap-2">
           <span
-            className="flex h-8 w-8 items-center justify-center rounded-full font-display text-sm font-semibold"
+            className="flex h-10 w-10 items-center justify-center rounded-xl font-display text-base font-bold shadow-sm"
             style={{
               background: "#F5A524",
               color: "#101B3D",
@@ -214,41 +108,15 @@ function LoginForm() {
           >
             B
           </span>
-
-          <span className="font-display text-lg font-semibold tracking-tight">
+          <span className="font-display text-2xl font-bold tracking-tight text-[#101B3D]">
             Billing
           </span>
         </div>
 
-        <div className="relative z-10 hidden lg:block">
-          <h1
-            className="font-display text-3xl font-medium leading-tight"
-            style={{ color: "#FFFFFF" }}
-          >
-            Billing that closes
-            <br />
-            itself out.
-          </h1>
-
-          <p
-            className="font-body mt-3 max-w-xs text-sm leading-relaxed"
-            style={{ color: "#B7C0E0" }}
-          >
-            Log in to see what&apos;s outstanding, what&apos;s cleared, and what
-            needs a nudge — all in one place.
-          </p>
-        </div>
-
-        <div className="relative z-10 mt-8 flex justify-center lg:mt-0 lg:justify-start">
-          <InvoiceMockup />
-        </div>
-      </div>
-
-      {/* Form panel */}
-      <div className="flex flex-1 items-center justify-center px-6 py-12 sm:px-10">
+        {/* Form Card */}
         <form
           onSubmit={handleSubmit}
-          className="font-body w-full max-w-sm rounded-2xl border p-8 shadow-sm"
+          className="font-body w-full rounded-2xl border p-8 shadow-sm"
           style={{
             borderColor: "#E4E7EC",
             background: "#FFFFFF",
@@ -261,10 +129,7 @@ function LoginForm() {
             Log in
           </h2>
 
-          <p
-            className="mt-1 text-sm"
-            style={{ color: "#667085" }}
-          >
+          <p className="mt-1 text-sm" style={{ color: "#667085" }}>
             Access your billing dashboard.
           </p>
 

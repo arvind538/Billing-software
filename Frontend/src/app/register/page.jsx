@@ -194,7 +194,6 @@ export default function RegisterPage() {
         role,
       });
 
-      // Agar backend direct register pe token return kar raha ho to save karein
       const token =
         response.data?.token ||
         response.data?.accessToken ||
@@ -215,7 +214,6 @@ export default function RegisterPage() {
       let message = "Registration failed. Please try again.";
 
       if (!err.response) {
-        // Backend band ho ya CORS error aaye
         message = "Cannot connect to server. Please check your backend connection.";
       } else if (err.response.data?.message) {
         message = err.response.data.message;
@@ -236,29 +234,14 @@ export default function RegisterPage() {
 
   return (
     <div
-      className="flex min-h-screen w-full flex-col lg:flex-row-reverse"
-      style={{ background: "#FFFFFF" }}
+      className="flex min-h-screen w-full items-center justify-center px-4 py-12"
+      style={{ background: "#F8FAFC" }}
     >
-      {/* BRAND PANEL */}
-      <div
-        className="relative flex w-full flex-col justify-between overflow-hidden px-8 py-8 lg:w-[46%] lg:px-14 lg:py-14"
-        style={{
-          background: "#101B3D",
-          color: "#FFFFFF",
-        }}
-      >
-        <div
-          className="pointer-events-none absolute inset-0 opacity-[0.04]"
-          style={{
-            backgroundImage:
-              "linear-gradient(rgba(255,255,255,1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,1) 1px, transparent 1px)",
-            backgroundSize: "32px 32px",
-          }}
-        />
-
-        <div className="relative z-10 flex items-center gap-2">
+      <div className="w-full max-w-md">
+        {/* Simple Brand Header */}
+        <div className="mb-6 flex items-center justify-center gap-2">
           <span
-            className="flex h-8 w-8 items-center justify-center rounded-full font-display text-sm font-semibold"
+            className="flex h-10 w-10 items-center justify-center rounded-xl font-display text-base font-bold shadow-sm"
             style={{
               background: "#F5A524",
               color: "#101B3D",
@@ -266,37 +249,15 @@ export default function RegisterPage() {
           >
             B
           </span>
-
-          <span className="font-display text-lg font-semibold tracking-tight">
+          <span className="font-display text-2xl font-bold tracking-tight text-[#101B3D]">
             Billing
           </span>
         </div>
 
-        <div className="relative z-10 hidden lg:block">
-          <h1
-            className="font-display text-3xl font-medium leading-tight"
-            style={{ color: "#FFFFFF" }}
-          >
-            Set up billing
-            <br />
-            in minutes.
-          </h1>
-
-          <p
-            className="font-body mt-3 max-w-xs text-sm leading-relaxed"
-            style={{ color: "#B7C0E0" }}
-          >
-            Create an account to start tracking invoices, customers, and
-            payments — all in one place.
-          </p>
-        </div>
-      </div>
-
-      {/* FORM PANEL */}
-      <div className="flex flex-1 items-center justify-center px-6 py-12 sm:px-10">
+        {/* Register Card */}
         <form
           onSubmit={handleSubmit}
-          className="font-body w-full max-w-sm rounded-2xl border p-8 shadow-sm"
+          className="font-body w-full rounded-2xl border p-8 shadow-sm"
           style={{
             borderColor: "#E4E7EC",
             background: "#FFFFFF",
@@ -309,10 +270,7 @@ export default function RegisterPage() {
             Create an account
           </h2>
 
-          <p
-            className="mt-1 text-sm"
-            style={{ color: "#667085" }}
-          >
+          <p className="mt-1 text-sm" style={{ color: "#667085" }}>
             Get started with your billing dashboard.
           </p>
 
@@ -452,7 +410,7 @@ export default function RegisterPage() {
           </select>
 
           <div
-            className="mt-2 rounded-lg px-3 py-1 text-xs"
+            className="mt-2 rounded-lg px-3 py-1.5 text-xs"
             style={{
               background: role === "admin" ? "#FFF8E7" : "#F2F4F7",
               color: role === "admin" ? "#B54708" : "#475467",
@@ -473,7 +431,7 @@ export default function RegisterPage() {
           <button
             type="submit"
             disabled={loading}
-            className="mt-4 w-full rounded-lg py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
+            className="mt-6 w-full rounded-lg py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
             style={{
               background: "#101B3D",
               color: "#FFFFFF",
