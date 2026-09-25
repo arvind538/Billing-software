@@ -1,69 +1,36 @@
 import { NextResponse } from "next/server";
-import { jwtVerify } from "jose";
 
-// Ye routes bina login ke accessible honge
 const publicRoutes = ["/login", "/register", "/forgot-password"];
 
-function normalizePath(pathname) {
-  if (pathname.length > 1 && pathname.endsWith("/")) {
-    return pathname.slice(0, -1);
-  }
-  return pathname;
-}
-
-// Token verify function
-async function isTokenValid(token) {
-  if (!token) return false;
-
-  const secretKey = process.env.JWT_SECRET;
-
-  // Agar env me JWT_SECRET nahi mila toh warning dega
-  if (!secretKey) {
-    console.warn("⚠️ Warning: JWT_SECRET environment variable is missing!");
-    // Agar secret nahi hai toh sirf token check karega (emergency fallback)
-    return Boolean(token);
-  }
-
-  try {
-    const secret = new TextEncoder().encode(secretKey);
-    await jwtVerify(token, secret);
-    return true;
-  } catch (err) {
-    console.error("Middleware JWT Verification Error:", err.message);
-    return false;
-  }
-}
-
 export async function middleware(request) {
-  const token = request.cookies.get("token")?.value;
-  const pathname = normalizePath(request.nextUrl.pathname);
+  const { pathname } = request.nextUrl;
 
-  const isPublicRoute = publicRoutes.includes(pathname);
+  // Static assets aur DevTools bypass
+  if (
+    pathname.startsWith("/_next") ||
+    pathname.startsWith("/api") ||
+    pathname.startsWith("/.well-known") ||
+    pathname.includes(".")
+  ) {
+    return NextResponse.next();
+  }
+
+  const token = request.cookies.get("token")?.value;
+  const isPublicRoute = publicRoutes.some((route) => pathname.startsWith(route));
   const isRoot = pathname === "/";
 
-  const validToken = await isTokenValid(token);
-
-  // 1. Root ("/") par aaye toh
+  // Root handling
   if (isRoot) {
-    const destination = validToken ? "/billing" : "/login";
-    return NextResponse.redirect(new URL(destination, request.url));
+    return NextResponse.redirect(new URL(token ? "/billing" : "/login", request.url));
   }
 
-  // 2. Token nahi hai aur protected route access kar raha hai
-  if (!validToken && !isPublicRoute) {
-    const loginUrl = new URL("/login", request.url);
-    loginUrl.searchParams.set("redirect", pathname);
-    const response = NextResponse.redirect(loginUrl);
-
-    // Sirf tab delete karo agar galat token present tha
-    if (token) {
-      response.cookies.delete("token");
-    }
-    return response;
+  // Bina token ke protected route par jaana mana hai
+  if (!token && !isPublicRoute) {
+    return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  // 3. Valid token hai aur login/register par ja raha hai -> /billing bhejo
-  if (validToken && isPublicRoute) {
+  // Already logged in hai aur login page khol raha hai
+  if (token && isPublicRoute) {
     return NextResponse.redirect(new URL("/billing", request.url));
   }
 
@@ -71,7 +38,5 @@ export async function middleware(request) {
 }
 
 export const config = {
-  matcher: [
-    "/((?!api|_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp|ico)$).*)",
-  ],
+  matcher: ["/((?!api|_next/static|_next/image|favicon.ico).*)"],
 };

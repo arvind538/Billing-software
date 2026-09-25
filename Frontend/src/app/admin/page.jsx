@@ -615,7 +615,7 @@ export default function AdminPanelPage() {
             STATS
         ================================================= */}
 
-                <div className="mb-7 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <div className="mb-7 grid grid-cols-1 gap-4 sm:grid-cols-4 xl:grid-cols-4">
                     <StatCard
                         title="Total Users"
                         value={stats?.totalUsers ?? "—"}

@@ -1,5 +1,5 @@
 import mongoose from "mongoose";
-import Invoice from "../models/Invoice.js";
+import Invoice from "../models/Invoice.js"; // Aapka model file name check karein
 import Product from "../models/Product.js";
 import Customer from "../models/Customer.js";
 
@@ -26,28 +26,23 @@ const generateInvoiceNumber = async (session) => {
   return `INV-${String(nextNumber).padStart(4, "0")}`;
 };
 
+// @desc    Create new invoice
+// @route   POST /api/invoices
 export const createInvoice = async (req, res) => {
   const session = await mongoose.startSession();
   session.startTransaction();
 
   try {
-    const {
-      items,
-      customerId,
-      discount = 0,
-      paymentMethod,
-    } = req.body;
+    const { items, customerId, discount = 0, paymentMethod } = req.body;
 
     if (!items || items.length === 0) {
-      throw new Error("Cart empty, one items selected");
+      throw new Error("Cart empty, please select at least one item.");
     }
 
     let subtotal = 0;
     let taxTotal = 0;
-
     const invoiceItems = [];
 
-    // Process products
     for (const item of items) {
       const product = await Product.findById(item.productId).session(session);
 
@@ -62,10 +57,7 @@ export const createInvoice = async (req, res) => {
       }
 
       const itemSubtotal = product.price * item.qty;
-
-      const itemTax =
-        (itemSubtotal * product.taxRate) / 100;
-
+      const itemTax = (itemSubtotal * Number(product.taxRate || 0)) / 100;
       const itemTotal = itemSubtotal + itemTax;
 
       subtotal += itemSubtotal;
@@ -80,20 +72,13 @@ export const createInvoice = async (req, res) => {
         total: itemTotal,
       });
 
-      // Reduce stock
       product.stock -= item.qty;
-
       await product.save({ session });
     }
 
-    // Calculate total
-    const grandTotal =
-      subtotal + taxTotal - Number(discount || 0);
-
-    // Generate invoice number
+    const grandTotal = subtotal + taxTotal - Number(discount || 0);
     const invoiceNumber = await generateInvoiceNumber(session);
 
-    // Create invoice
     const invoice = await Invoice.create(
       [
         {
@@ -110,7 +95,6 @@ export const createInvoice = async (req, res) => {
       { session }
     );
 
-    // Update customer purchase total
     if (customerId) {
       await Customer.findByIdAndUpdate(
         customerId,
@@ -119,44 +103,44 @@ export const createInvoice = async (req, res) => {
             totalPurchases: grandTotal,
           },
         },
-        {
-          session,
-        }
+        { session }
       );
     }
 
     await session.commitTransaction();
     session.endSession();
 
-    res.status(201).json(invoice[0]);
+    return res.status(201).json(invoice[0]);
   } catch (err) {
     await session.abortTransaction();
     session.endSession();
 
     console.error("Create Invoice Error:", err);
-
-    res.status(400).json({
+    return res.status(400).json({
       message: err.message,
     });
   }
 };
 
-// Get all invoices
+// @desc    Get all invoices
+// @route   GET /api/invoices
 export const getInvoices = async (req, res) => {
   try {
     const invoices = await Invoice.find()
       .populate("customer")
       .sort({ createdAt: -1 });
 
-    res.json(invoices);
+    return res.status(200).json(invoices);
   } catch (err) {
-    res.status(500).json({
+    console.error("Get Invoices Error:", err);
+    return res.status(500).json({
       message: err.message,
     });
   }
 };
 
-// Get invoice by ID
+// @desc    Get single invoice by ID
+// @route   GET /api/invoices/:id
 export const getInvoiceById = async (req, res) => {
   try {
     const invoice = await Invoice.findById(req.params.id)
@@ -169,10 +153,78 @@ export const getInvoiceById = async (req, res) => {
       });
     }
 
-    res.json(invoice);
+    return res.status(200).json(invoice);
   } catch (err) {
-    res.status(500).json({
+    console.error("Get Invoice By ID Error:", err);
+    return res.status(500).json({
       message: err.message,
+    });
+  }
+};
+
+// @desc    Update Invoice (Payment Mode, Date etc.)
+// @route   PUT /api/invoices/:id
+export const updateInvoice = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { paymentMethod, date } = req.body;
+
+    const updatedInvoice = await Invoice.findByIdAndUpdate(
+      id,
+      {
+        $set: {
+          ...(paymentMethod && { paymentMethod }),
+          ...(date && { createdAt: new Date(date), date: new Date(date) }),
+        },
+      },
+      { new: true }
+    );
+
+    if (!updatedInvoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice nahi mila database mein.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Invoice updated successfully",
+      invoice: updatedInvoice,
+    });
+  } catch (error) {
+    console.error("Update Invoice Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to update invoice",
+    });
+  }
+};
+
+// @desc    Delete Invoice
+// @route   DELETE /api/invoices/:id
+export const deleteInvoice = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const deletedInvoice = await Invoice.findByIdAndDelete(id);
+
+    if (!deletedInvoice) {
+      return res.status(404).json({
+        success: false,
+        message: "Invoice database mein nahi mila.",
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Invoice deleted successfully",
+    });
+  } catch (error) {
+    console.error("Delete Invoice Error:", error);
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Failed to delete invoice",
     });
   }
 };

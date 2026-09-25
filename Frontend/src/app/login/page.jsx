@@ -135,69 +135,52 @@ function LoginForm() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
-
-    if (!email.trim() || !password) {
-      setError("Please enter email and password.");
-      return;
-    }
-
     setLoading(true);
 
     try {
       const response = await api.post("/auth/login", {
-        email: email.trim(),
-        password,
+        email: email.trim().toLowerCase(),
+        password: password,
       });
 
-      // Browser console me check karein response ka structure kaisa hai
-      console.log("FULL RESPONSE DATA:", JSON.stringify(response.data, null, 2));
-
-      const resData = response.data || {};
-
-      // Recursively token/jwt key find karein agar response nested ho
+      // Backend se token aur user details extract karein
       const token =
-        resData.token ||
-        resData.accessToken ||
-        resData.access_token ||
-        resData.jwt ||
-        resData.data?.token ||
-        resData.data?.accessToken ||
-        resData.data?.access_token ||
-        (typeof resData === "string" ? resData : null);
+        response.data?.token ||
+        response.data?.accessToken ||
+        response.data?.jwt;
 
       if (token) {
+        // 1. LocalStorage me real JWT token aur user payload save karein
         localStorage.setItem("token", token);
+        localStorage.setItem("user", JSON.stringify(response.data));
+
+        // 2. Cookie me save karein Next.js Middleware ke liye (7 days expiry)
         document.cookie = `token=${token}; path=/; max-age=604800; SameSite=Lax`;
+
+        // 3. DevTools URL loop se bachate hue clean redirect karein
+        const redirectParam = searchParams.get("redirect");
+        const safeDestination =
+          redirectParam &&
+            !redirectParam.includes(".well-known") &&
+            !redirectParam.includes("com.chrome.devtools")
+            ? redirectParam
+            : "/billing";
+
+        window.location.replace(safeDestination);
+      } else {
+        setError("Login successful but no authentication token received from server.");
       }
-
-      const user = resData.user || resData.data?.user || resData.userData;
-      if (user) {
-        localStorage.setItem("user", JSON.stringify(user));
-      }
-
-      toast.success("Login Successfully!");
-
-      const redirectTo = searchParams.get("redirect") || "/billing";
-
-      setTimeout(() => {
-        window.location.href = redirectTo;
-      }, 500);
-
     } catch (err) {
-      console.error("Login failed:", err);
       const message =
-        err?.response?.data?.message ||
-        err?.response?.data?.error ||
-        err?.message ||
+        err.response?.data?.message ||
+        err.response?.data?.error ||
         "Invalid email or password.";
-
       setError(message);
-      toast.error(message);
+      toast?.error?.(message);
+    } finally {
       setLoading(false);
     }
   };
-
-
 
   return (
     <div
@@ -251,8 +234,8 @@ function LoginForm() {
             className="font-body mt-3 max-w-xs text-sm leading-relaxed"
             style={{ color: "#B7C0E0" }}
           >
-            Log in to see what&apos;s outstanding, what&apos;s cleared,
-            and what needs a nudge — all in one place.
+            Log in to see what&apos;s outstanding, what&apos;s cleared, and what
+            needs a nudge — all in one place.
           </p>
         </div>
 
