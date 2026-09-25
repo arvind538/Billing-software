@@ -2,7 +2,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 import dns from "dns";
-dns.setServers(['8.8.8.8', '8.8.4.4']);
+dns.setServers(["8.8.8.8", "8.8.4.4"]);
 
 import express from "express";
 import cors from "cors";
@@ -18,25 +18,13 @@ connectDB();
 
 const app = express();
 
-// Allowed origins list (trailing slash issue se bachne ke liye)
-const allowedOrigins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    process.env.FRONTEND_URI?.replace(/\/$/, ""), // aakhri ka '/' remove karega agar ho toh
-].filter(Boolean);
-
 app.use(
     cors({
-        origin: (origin, callback) => {
-            // Allow requests with no origin (like Postman or server-to-server)
-            if (!origin || allowedOrigins.includes(origin)) {
-                callback(null, true);
-            } else {
-                callback(new Error(`CORS blocked: ${origin} not allowed`));
-            }
-        },
-        methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-        allowedHeaders: ["Content-Type", "Authorization"],
+        origin: [
+            "https://billing-software-en5c.vercel.app",
+            "http://localhost:3000",
+            "http://localhost:5173"
+        ],
         credentials: true,
     })
 );
@@ -51,9 +39,9 @@ app.use("/api/customers", customerRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/admin", adminRoutes);
 
-app.get("/", (req, res) => res.send("Billing API running"));
+app.get("/api/health", (req, res) => res.send("Billing API running"));
 
-// Global error handler (isse server crash hone se bachega)
+// Global error handler
 app.use((err, req, res, next) => {
     console.error("Backend Error:", err.message);
     res.status(500).json({ error: err.message || "Internal Server Error" });
