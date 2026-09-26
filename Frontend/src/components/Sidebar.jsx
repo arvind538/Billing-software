@@ -528,13 +528,38 @@ export default function Sidebar() {
         setMobileOpen(false);
     }, [pathname]);
 
+    // ----------change logout------------
+    // const handleLogout = async () => {
+    //     try {
+    //         await api.post("/auth/logout");
+    //     } catch { }
+    //     setUser(null);
+    //     router.push("/login");
+    //     router.refresh();
+    // };
     const handleLogout = async () => {
         try {
             await api.post("/auth/logout");
         } catch { }
+
+        // 1. React state clear
         setUser(null);
-        router.push("/login");
-        router.refresh();
+
+        // 2. localStorage clear (login page yahan bhi token/user store karta hai)
+        if (typeof window !== "undefined") {
+            localStorage.removeItem("token");
+            localStorage.removeItem("user");
+
+            // 3. Cookie ko EXACT same attributes ke saath expire karo jaise login
+            //    page ne set ki thi — production HTTPS ke liye Secure conditionally add
+            const isSecure = window.location.protocol === "https:";
+            document.cookie = `token=; path=/; max-age=0; SameSite=Lax${isSecure ? "; Secure" : ""}`;
+        }
+
+        // 4. Hard redirect — router.push nahi, taaki Next.js middleware turant
+        //    fresh (cookie-less) state ke saath re-evaluate ho, aur login page
+        //    guaranteed khule
+        window.location.replace("/login");
     };
 
     if (hideSidebar) return null;

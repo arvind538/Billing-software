@@ -5,6 +5,40 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import api from "@/lib/api";
 import { toast } from "react-toastify";
+import { z } from "zod";
+
+// ========================================
+// ZOD SCHEMA
+// ========================================
+const registerSchema = z
+  .object({
+    name: z
+      .string({ error: "Name is required" })
+      .trim()
+      .min(3, "Name must be at least 3 characters")
+      .max(50, "Name must be less than 50 characters"),
+
+    email: z
+      .string({ error: "Email is required" })
+      .trim()
+      .toLowerCase()
+      .email("Invalid email address"),
+
+    password: z
+      .string({ error: "Password is required" })
+      .min(6, "Password must be at least 6 characters")
+      .max(64, "Password too long"),
+
+    confirmPassword: z.string({ error: "Please confirm your password" }),
+
+    role: z.enum(["admin", "cashier"], {
+      error: "Please select a valid role",
+    }),
+  })
+  .refine((data) => data.password === data.confirmPassword, {
+    message: "Passwords do not match",
+    path: ["confirmPassword"], // error confirmPassword field ke niche dikhega
+  });
 
 function EyeIcon({ open }) {
   return open ? (
@@ -136,6 +170,7 @@ export default function RegisterPage() {
 
   // UI STATES
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({}); // 👈 Zod field-wise errors
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
 
@@ -150,48 +185,45 @@ export default function RegisterPage() {
     return () => clearTimeout(timer);
   }, [success, router]);
 
+  const clearFieldError = (field) => {
+    if (fieldErrors[field]) {
+      setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
+    setFieldErrors({});
 
-    if (!name.trim()) {
-      setError("Please enter your name.");
-      return;
-    }
+    // ========================================
+    // ZOD VALIDATION — submit se pehle
+    // ========================================
+    const result = registerSchema.safeParse({
+      name,
+      email,
+      password,
+      confirmPassword,
+      role,
+    });
 
-    if (!email.trim()) {
-      setError("Please enter your email.");
-      return;
-    }
-
-    if (!password) {
-      setError("Please enter a password.");
-      return;
-    }
-
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters.");
-      return;
-    }
-
-    if (password !== confirmPassword) {
-      setError("Passwords do not match.");
-      return;
-    }
-
-    if (!role) {
-      setError("Please select a role.");
-      return;
+    if (!result.success) {
+      const errors = {};
+      result.error.issues.forEach((issue) => {
+        errors[issue.path[0]] = issue.message;
+      });
+      setFieldErrors(errors);
+      return; // yahin ruk jayega, API call nahi jayegi
     }
 
     setLoading(true);
 
     try {
       const response = await api.post("/auth/register", {
-        name: name.trim(),
-        email: email.trim().toLowerCase(),
-        password,
-        role,
+        name: result.data.name.trim(),
+        email: result.data.email,
+        password: result.data.password,
+        role: result.data.role,
       });
 
       const token =
@@ -210,6 +242,15 @@ export default function RegisterPage() {
         "Registration error:",
         err?.response?.data || err.message
       );
+
+      // Backend se Zod field errors aaye to unhe bhi dikha do
+      if (err.response?.data?.errors) {
+        const backendErrors = {};
+        err.response.data.errors.forEach((fe) => {
+          backendErrors[fe.field] = fe.message;
+        });
+        setFieldErrors(backendErrors);
+      }
 
       let message = "Registration failed. Please try again.";
 
@@ -262,6 +303,7 @@ export default function RegisterPage() {
             borderColor: "#E4E7EC",
             background: "#FFFFFF",
           }}
+          noValidate
         >
           <h2
             className="font-display text-2xl font-semibold"
@@ -298,15 +340,24 @@ export default function RegisterPage() {
             type="text"
             placeholder="Your name"
             value={name}
-            onChange={(e) => setName(e.target.value)}
-            required
+            onChange={(e) => {
+              setName(e.target.value);
+              clearFieldError("name");
+            }}
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
             style={{
-              borderColor: "#E4E7EC",
+              borderColor: fieldErrors.name ? "#FDA29B" : "#E4E7EC",
               color: "#101828",
-              "--tw-ring-color": "rgba(16,27,61,0.12)",
+              "--tw-ring-color": fieldErrors.name
+                ? "rgba(180,35,24,0.12)"
+                : "rgba(16,27,61,0.12)",
             }}
           />
+          {fieldErrors.name && (
+            <p className="mt-1 text-xs font-medium" style={{ color: "#B42318" }}>
+              {fieldErrors.name}
+            </p>
+          )}
 
           {/* EMAIL */}
           <label
@@ -320,15 +371,24 @@ export default function RegisterPage() {
             type="email"
             placeholder="you@company.com"
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
+            onChange={(e) => {
+              setEmail(e.target.value);
+              clearFieldError("email");
+            }}
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
             style={{
-              borderColor: "#E4E7EC",
+              borderColor: fieldErrors.email ? "#FDA29B" : "#E4E7EC",
               color: "#101828",
-              "--tw-ring-color": "rgba(16,27,61,0.12)",
+              "--tw-ring-color": fieldErrors.email
+                ? "rgba(180,35,24,0.12)"
+                : "rgba(16,27,61,0.12)",
             }}
           />
+          {fieldErrors.email && (
+            <p className="mt-1 text-xs font-medium" style={{ color: "#B42318" }}>
+              {fieldErrors.email}
+            </p>
+          )}
 
           {/* PASSWORD */}
           <label
@@ -343,13 +403,17 @@ export default function RegisterPage() {
               type={showPassword ? "text" : "password"}
               placeholder="At least 6 characters"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
+              onChange={(e) => {
+                setPassword(e.target.value);
+                clearFieldError("password");
+              }}
               className="w-full rounded-lg border px-3 py-2.5 pr-10 text-sm outline-none transition focus:ring-[3px]"
               style={{
-                borderColor: "#E4E7EC",
+                borderColor: fieldErrors.password ? "#FDA29B" : "#E4E7EC",
                 color: "#101828",
-                "--tw-ring-color": "rgba(16,27,61,0.12)",
+                "--tw-ring-color": fieldErrors.password
+                  ? "rgba(180,35,24,0.12)"
+                  : "rgba(16,27,61,0.12)",
               }}
             />
 
@@ -363,6 +427,11 @@ export default function RegisterPage() {
               <EyeIcon open={showPassword} />
             </button>
           </div>
+          {fieldErrors.password && (
+            <p className="mt-1 text-xs font-medium" style={{ color: "#B42318" }}>
+              {fieldErrors.password}
+            </p>
+          )}
 
           {/* CONFIRM PASSWORD */}
           <label
@@ -376,15 +445,24 @@ export default function RegisterPage() {
             type={showPassword ? "text" : "password"}
             placeholder="Re-enter password"
             value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            required
+            onChange={(e) => {
+              setConfirmPassword(e.target.value);
+              clearFieldError("confirmPassword");
+            }}
             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
             style={{
-              borderColor: "#E4E7EC",
+              borderColor: fieldErrors.confirmPassword ? "#FDA29B" : "#E4E7EC",
               color: "#101828",
-              "--tw-ring-color": "rgba(16,27,61,0.12)",
+              "--tw-ring-color": fieldErrors.confirmPassword
+                ? "rgba(180,35,24,0.12)"
+                : "rgba(16,27,61,0.12)",
             }}
           />
+          {fieldErrors.confirmPassword && (
+            <p className="mt-1 text-xs font-medium" style={{ color: "#B42318" }}>
+              {fieldErrors.confirmPassword}
+            </p>
+          )}
 
           {/* ROLE SELECT */}
           <label
@@ -396,11 +474,13 @@ export default function RegisterPage() {
 
           <select
             value={role}
-            onChange={(e) => setRole(e.target.value)}
-            required
+            onChange={(e) => {
+              setRole(e.target.value);
+              clearFieldError("role");
+            }}
             className="mt-1.5 w-full rounded-lg border bg-white px-3 py-2 text-sm outline-none transition focus:ring-[3px]"
             style={{
-              borderColor: "#E4E7EC",
+              borderColor: fieldErrors.role ? "#FDA29B" : "#E4E7EC",
               color: "#101828",
               "--tw-ring-color": "rgba(16,27,61,0.12)",
             }}
@@ -408,6 +488,11 @@ export default function RegisterPage() {
             <option value="cashier">Cashier</option>
             <option value="admin">Admin</option>
           </select>
+          {fieldErrors.role && (
+            <p className="mt-1 text-xs font-medium" style={{ color: "#B42318" }}>
+              {fieldErrors.role}
+            </p>
+          )}
 
           <div
             className="mt-2 rounded-lg px-3 py-1.5 text-xs"
@@ -459,3 +544,468 @@ export default function RegisterPage() {
     </div>
   );
 }
+
+
+
+
+// "use client";
+
+// import { useState, useEffect } from "react";
+// import { useRouter } from "next/navigation";
+// import Link from "next/link";
+// import api from "@/lib/api";
+// import { toast } from "react-toastify";
+
+// function EyeIcon({ open }) {
+//   return open ? (
+//     <svg
+//       width="18"
+//       height="18"
+//       viewBox="0 0 24 24"
+//       fill="none"
+//       stroke="currentColor"
+//       strokeWidth="1.8"
+//     >
+//       <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
+//       <circle cx="12" cy="12" r="3" />
+//     </svg>
+//   ) : (
+//     <svg
+//       width="18"
+//       height="18"
+//       viewBox="0 0 24 24"
+//       fill="none"
+//       stroke="currentColor"
+//       strokeWidth="1.8"
+//     >
+//       <path d="M3 3l18 18" />
+//       <path d="M10.6 5.2A10.6 10.6 0 0 1 12 5c6.5 0 10 7 10 7a15.9 15.9 0 0 1-3.3 4.2M6.5 6.6C4 8.3 2 12 2 12s3.5 7 10 7c1.4 0 2.7-.3 3.8-.8" />
+//       <path d="M9.5 9.7A3 3 0 0 0 12 15a3 3 0 0 0 2.3-1.1" />
+//     </svg>
+//   );
+// }
+
+// function CheckIcon() {
+//   return (
+//     <svg
+//       width="32"
+//       height="32"
+//       viewBox="0 0 24 24"
+//       fill="none"
+//       stroke="currentColor"
+//       strokeWidth="2.5"
+//       strokeLinecap="round"
+//       strokeLinejoin="round"
+//     >
+//       <path d="M20 6 9 17l-5-5" />
+//     </svg>
+//   );
+// }
+
+// function SuccessScreen() {
+//   return (
+//     <div
+//       className="flex min-h-screen w-full items-center justify-center px-4"
+//       style={{ background: "#FFFFFF" }}
+//     >
+//       <div
+//         className="flex w-full max-w-sm flex-col items-center rounded-2xl border p-10 text-center shadow-sm"
+//         style={{ borderColor: "#E4E7EC" }}
+//       >
+//         <div
+//           className="flex h-16 w-16 items-center justify-center rounded-full"
+//           style={{
+//             background: "rgba(18,183,106,0.12)",
+//             color: "#12B76A",
+//             animation: "regSuccessPop 0.4s ease-out",
+//           }}
+//         >
+//           <CheckIcon />
+//         </div>
+
+//         <h2
+//           className="font-display mt-5 text-xl font-semibold"
+//           style={{ color: "#101828" }}
+//         >
+//           Account created!
+//         </h2>
+
+//         <p className="mt-2 text-sm" style={{ color: "#667085" }}>
+//           Taking you to the login page...
+//         </p>
+
+//         <div
+//           className="mt-6 h-1 w-full overflow-hidden rounded-full"
+//           style={{ background: "#E4E7EC" }}
+//         >
+//           <div
+//             className="h-full rounded-full"
+//             style={{
+//               background: "#101B3D",
+//               animation: "regSuccessBar 1.6s linear forwards",
+//             }}
+//           />
+//         </div>
+
+//         <style jsx>{`
+//           @keyframes regSuccessPop {
+//             0% {
+//               transform: scale(0.6);
+//               opacity: 0;
+//             }
+//             100% {
+//               transform: scale(1);
+//               opacity: 1;
+//             }
+//           }
+
+//           @keyframes regSuccessBar {
+//             0% {
+//               width: 0%;
+//             }
+//             100% {
+//               width: 100%;
+//             }
+//           }
+//         `}</style>
+//       </div>
+//     </div>
+//   );
+// }
+
+// export default function RegisterPage() {
+//   const router = useRouter();
+
+//   // FORM STATES
+//   const [name, setName] = useState("");
+//   const [email, setEmail] = useState("");
+//   const [password, setPassword] = useState("");
+//   const [confirmPassword, setConfirmPassword] = useState("");
+//   const [role, setRole] = useState("cashier");
+//   const [showPassword, setShowPassword] = useState(false);
+
+//   // UI STATES
+//   const [error, setError] = useState("");
+//   const [loading, setLoading] = useState(false);
+//   const [success, setSuccess] = useState(false);
+
+//   // Auto redirect cleanup
+//   useEffect(() => {
+//     let timer;
+//     if (success) {
+//       timer = setTimeout(() => {
+//         router.push("/login");
+//       }, 1800);
+//     }
+//     return () => clearTimeout(timer);
+//   }, [success, router]);
+
+//   const handleSubmit = async (e) => {
+//     e.preventDefault();
+//     setError("");
+
+//     if (!name.trim()) {
+//       setError("Please enter your name.");
+//       return;
+//     }
+
+//     if (!email.trim()) {
+//       setError("Please enter your email.");
+//       return;
+//     }
+
+//     if (!password) {
+//       setError("Please enter a password.");
+//       return;
+//     }
+
+//     if (password.length < 6) {
+//       setError("Password must be at least 6 characters.");
+//       return;
+//     }
+
+//     if (password !== confirmPassword) {
+//       setError("Passwords do not match.");
+//       return;
+//     }
+
+//     if (!role) {
+//       setError("Please select a role.");
+//       return;
+//     }
+
+//     setLoading(true);
+
+//     try {
+//       const response = await api.post("/auth/register", {
+//         name: name.trim(),
+//         email: email.trim().toLowerCase(),
+//         password,
+//         role,
+//       });
+
+//       const token =
+//         response.data?.token ||
+//         response.data?.accessToken ||
+//         response.data?.data?.token;
+
+//       if (token) {
+//         localStorage.setItem("token", token);
+//       }
+
+//       toast.success("Account created successfully!");
+//       setSuccess(true);
+//     } catch (err) {
+//       console.error(
+//         "Registration error:",
+//         err?.response?.data || err.message
+//       );
+
+//       let message = "Registration failed. Please try again.";
+
+//       if (!err.response) {
+//         message = "Cannot connect to server. Please check your backend connection.";
+//       } else if (err.response.data?.message) {
+//         message = err.response.data.message;
+//       } else if (err.response.data?.error) {
+//         message = err.response.data.error;
+//       }
+
+//       setError(message);
+//       toast.error(message);
+//     } finally {
+//       setLoading(false);
+//     }
+//   };
+
+//   if (success) {
+//     return <SuccessScreen />;
+//   }
+
+//   return (
+//     <div
+//       className="flex min-h-screen w-full items-center justify-center px-4 py-12"
+//       style={{ background: "#F8FAFC" }}
+//     >
+//       <div className="w-full max-w-md">
+//         {/* Simple Brand Header */}
+//         <div className="mb-6 flex items-center justify-center gap-2">
+//           <span
+//             className="flex h-10 w-10 items-center justify-center rounded-xl font-display text-base font-bold shadow-sm"
+//             style={{
+//               background: "#F5A524",
+//               color: "#101B3D",
+//             }}
+//           >
+//             B
+//           </span>
+//           <span className="font-display text-2xl font-bold tracking-tight text-[#101B3D]">
+//             Billing
+//           </span>
+//         </div>
+
+//         {/* Register Card */}
+//         <form
+//           onSubmit={handleSubmit}
+//           className="font-body w-full rounded-2xl border p-8 shadow-sm"
+//           style={{
+//             borderColor: "#E4E7EC",
+//             background: "#FFFFFF",
+//           }}
+//         >
+//           <h2
+//             className="font-display text-2xl font-semibold"
+//             style={{ color: "#101828" }}
+//           >
+//             Create an account
+//           </h2>
+
+//           <p className="mt-1 text-sm" style={{ color: "#667085" }}>
+//             Get started with your billing dashboard.
+//           </p>
+
+//           {error && (
+//             <p
+//               className="mt-4 rounded-lg px-3 py-2 text-sm"
+//               style={{
+//                 background: "#FEF3F2",
+//                 color: "#B42318",
+//               }}
+//             >
+//               {error}
+//             </p>
+//           )}
+
+//           {/* NAME */}
+//           <label
+//             className="mt-6 block text-xs font-medium"
+//             style={{ color: "#101828" }}
+//           >
+//             Full name
+//           </label>
+
+//           <input
+//             type="text"
+//             placeholder="Your name"
+//             value={name}
+//             onChange={(e) => setName(e.target.value)}
+//             required
+//             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
+//             style={{
+//               borderColor: "#E4E7EC",
+//               color: "#101828",
+//               "--tw-ring-color": "rgba(16,27,61,0.12)",
+//             }}
+//           />
+
+//           {/* EMAIL */}
+//           <label
+//             className="mt-4 block text-xs font-medium"
+//             style={{ color: "#101828" }}
+//           >
+//             Email
+//           </label>
+
+//           <input
+//             type="email"
+//             placeholder="you@company.com"
+//             value={email}
+//             onChange={(e) => setEmail(e.target.value)}
+//             required
+//             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
+//             style={{
+//               borderColor: "#E4E7EC",
+//               color: "#101828",
+//               "--tw-ring-color": "rgba(16,27,61,0.12)",
+//             }}
+//           />
+
+//           {/* PASSWORD */}
+//           <label
+//             className="mt-4 block text-xs font-medium"
+//             style={{ color: "#101828" }}
+//           >
+//             Password
+//           </label>
+
+//           <div className="relative mt-1.5">
+//             <input
+//               type={showPassword ? "text" : "password"}
+//               placeholder="At least 6 characters"
+//               value={password}
+//               onChange={(e) => setPassword(e.target.value)}
+//               required
+//               className="w-full rounded-lg border px-3 py-2.5 pr-10 text-sm outline-none transition focus:ring-[3px]"
+//               style={{
+//                 borderColor: "#E4E7EC",
+//                 color: "#101828",
+//                 "--tw-ring-color": "rgba(16,27,61,0.12)",
+//               }}
+//             />
+
+//             <button
+//               type="button"
+//               onClick={() => setShowPassword((v) => !v)}
+//               className="absolute right-3 top-1/2 -translate-y-1/2"
+//               style={{ color: "#667085" }}
+//               aria-label={showPassword ? "Hide password" : "Show password"}
+//             >
+//               <EyeIcon open={showPassword} />
+//             </button>
+//           </div>
+
+//           {/* CONFIRM PASSWORD */}
+//           <label
+//             className="mt-4 block text-xs font-medium"
+//             style={{ color: "#101828" }}
+//           >
+//             Confirm password
+//           </label>
+
+//           <input
+//             type={showPassword ? "text" : "password"}
+//             placeholder="Re-enter password"
+//             value={confirmPassword}
+//             onChange={(e) => setConfirmPassword(e.target.value)}
+//             required
+//             className="mt-1.5 w-full rounded-lg border px-3 py-2.5 text-sm outline-none transition focus:ring-[3px]"
+//             style={{
+//               borderColor: "#E4E7EC",
+//               color: "#101828",
+//               "--tw-ring-color": "rgba(16,27,61,0.12)",
+//             }}
+//           />
+
+//           {/* ROLE SELECT */}
+//           <label
+//             className="mt-4 block text-xs font-medium"
+//             style={{ color: "#101828" }}
+//           >
+//             Account Role
+//           </label>
+
+//           <select
+//             value={role}
+//             onChange={(e) => setRole(e.target.value)}
+//             required
+//             className="mt-1.5 w-full rounded-lg border bg-white px-3 py-2 text-sm outline-none transition focus:ring-[3px]"
+//             style={{
+//               borderColor: "#E4E7EC",
+//               color: "#101828",
+//               "--tw-ring-color": "rgba(16,27,61,0.12)",
+//             }}
+//           >
+//             <option value="cashier">Cashier</option>
+//             <option value="admin">Admin</option>
+//           </select>
+
+//           <div
+//             className="mt-2 rounded-lg px-3 py-1.5 text-xs"
+//             style={{
+//               background: role === "admin" ? "#FFF8E7" : "#F2F4F7",
+//               color: role === "admin" ? "#B54708" : "#475467",
+//             }}
+//           >
+//             {role === "admin" ? (
+//               <>
+//                 👑 <strong>Admin:</strong> Full access to billing management.
+//               </>
+//             ) : (
+//               <>
+//                 👤 <strong>Cashier:</strong> Billing and customer operations access.
+//               </>
+//             )}
+//           </div>
+
+//           {/* SUBMIT BUTTON */}
+//           <button
+//             type="submit"
+//             disabled={loading}
+//             className="mt-6 w-full rounded-lg py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
+//             style={{
+//               background: "#101B3D",
+//               color: "#FFFFFF",
+//             }}
+//           >
+//             {loading ? "Creating account..." : "Create account"}
+//           </button>
+
+//           {/* LOGIN LINK */}
+//           <p
+//             className="mt-6 text-center text-sm"
+//             style={{ color: "#667085" }}
+//           >
+//             Already have an account?{" "}
+//             <Link
+//               href="/login"
+//               className="font-medium hover:underline"
+//               style={{ color: "#101B3D" }}
+//             >
+//               Log in
+//             </Link>
+//           </p>
+//         </form>
+//       </div>
+//     </div>
+//   );
+// }
