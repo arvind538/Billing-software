@@ -3,46 +3,15 @@
 import { useEffect, useMemo, useState } from "react";
 import api from "@/lib/api";
 import { toast } from "react-toastify";
-import { z } from "zod";
 
 const initialForm = {
   name: "",
   sku: "",
   price: "",
   stock: "",
-  taxRate: "18%", // 18% GST (9% CGST + 9% SGST)
+  taxRate: "18", // 18% GST (9% CGST + 9% SGST)
   category: "Electronics",
 };
-
-/* =========================================================
-   ZOD SCHEMA
-========================================================= */
-const productSchema = z.object({
-  name: z
-    .string({ error: "Product name is required" })
-    .trim()
-    .min(2, "Name must be at least 2 characters")
-    .max(100, "Name too long"),
-  sku: z
-    .string({ error: "HSN/SKU is required" })
-    .trim()
-    .min(1, "HSN/SKU cannot be empty"),
-  category: z
-    .string({ error: "Category is required" })
-    .trim()
-    .min(1, "Please select a category"),
-  price: z.coerce
-    .number({ error: "Price must be a valid number" })
-    .positive("Price must be greater than 0"),
-  stock: z.coerce
-    .number({ error: "Stock must be a valid number" })
-    .int("Stock must be a whole number")
-    .nonnegative("Stock cannot be negative"),
-  taxRate: z.coerce
-    .number({ error: "Tax rate must be a number" })
-    .min(0, "Tax cannot be negative")
-    .max(100, "Tax cannot exceed 100%"),
-});
 
 /* =========================================================
    ICON COMPONENT
@@ -145,7 +114,7 @@ function Icon({ name, size = 18 }) {
 }
 
 /* =========================================================
-   INPUT COMPONENT (ab error prop ke saath)
+   INPUT COMPONENT
 ========================================================= */
 function FormInput({
   label,
@@ -159,7 +128,6 @@ function FormInput({
   min,
   max,
   step,
-  error,
 }) {
   return (
     <div className="w-full">
@@ -184,23 +152,16 @@ function FormInput({
           min={min}
           max={max}
           step={step}
-          className={`w-full rounded-xl border bg-slate-50/50 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 outline-none transition-all placeholder:text-slate-400 placeholder:font-normal hover:border-slate-300 focus:bg-white focus:ring-4 ${icon ? "pl-9 sm:pl-10" : "px-3.5"
-            } pr-3.5 ${error
-              ? "border-red-400 focus:border-red-500 focus:ring-red-500/10"
-              : "border-slate-200 focus:border-indigo-600 focus:ring-indigo-600/10"
-            }`}
+          className={`w-full rounded-xl border border-slate-200 bg-slate-50/50 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 outline-none transition-all placeholder:text-slate-400 placeholder:font-normal hover:border-slate-300 focus:bg-white focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 ${icon ? "pl-9 sm:pl-10" : "px-3.5"
+            } pr-3.5`}
         />
       </div>
-
-      {error && (
-        <p className="mt-1 text-[11px] font-semibold text-red-500">{error}</p>
-      )}
     </div>
   );
 }
 
 /* =========================================================
-   KPI STAT CARD (ab clickable)
+   KPI STAT CARD
 ========================================================= */
 function KpiCard({ title, value, subtitle, icon, accent, danger = false, onClick }) {
   return (
@@ -244,17 +205,14 @@ function KpiCard({ title, value, subtitle, icon, accent, danger = false, onClick
 export default function ProductsPage() {
   const [products, setProducts] = useState([]);
   const [form, setForm] = useState(initialForm);
-  const [fieldErrors, setFieldErrors] = useState({}); // 👈 Zod errors
   const [editingId, setEditingId] = useState(null);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  // KPI detail modal state
-  const [activeKpi, setActiveKpi] = useState(null); // "skus" | "stock" | "categories" | "lowstock"
+  const [activeKpi, setActiveKpi] = useState(null);
 
-  // Close on ESC key
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (e.key === "Escape") setActiveKpi(null);
@@ -269,7 +227,13 @@ export default function ProductsPage() {
       else setLoading(true);
 
       const res = await api.get("/products");
-      setProducts(Array.isArray(res.data) ? res.data : []);
+      // Handle array or wrapped response object { products: [...] }
+      const list = Array.isArray(res.data)
+        ? res.data
+        : Array.isArray(res.data?.products)
+          ? res.data.products
+          : [];
+      setProducts(list);
     } catch (err) {
       toast.error(err.response?.data?.message || "Products load nahi ho paye.");
     } finally {
@@ -285,40 +249,57 @@ export default function ProductsPage() {
   const handleChange = (e) => {
     const { name, value } = e.target;
     setForm((prev) => ({ ...prev, [name]: value }));
-
-    if (fieldErrors[name]) {
-      setFieldErrors((prev) => ({ ...prev, [name]: undefined }));
-    }
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
 
-    // ========================================
-    // ZOD VALIDATION — submit se pehle
-    // ========================================
-    const result = productSchema.safeParse(form);
-
-    if (!result.success) {
-      const errors = {};
-      result.error.issues.forEach((issue) => {
-        errors[issue.path[0]] = issue.message;
-      });
-      setFieldErrors(errors);
-      toast.error("Please fix the highlighted fields.");
-      return; // yahin ruk jayega, API call nahi jayegi
+    // 1. Client-Side Validations
+    if (!form.name.trim()) {
+      toast.error("Product name is required.");
+      return;
     }
-
-    setFieldErrors({});
+    if (!form.sku.trim()) {
+      toast.error("HSN / SKU is required.");
+      return;
+    }
+    if (!form.price || isNaN(Number(form.price)) || Number(form.price) <= 0) {
+      toast.error("Please enter a valid price greater than 0.");
+      return;
+    }
+    if (form.stock === "" || isNaN(Number(form.stock)) || Number(form.stock) < 0) {
+      toast.error("Please enter a valid stock quantity (0 or more).");
+      return;
+    }
 
     try {
       setSaving(true);
 
+      // 2. Multi-compatibility Payload
+      // Backend chahe sku mange ya barcode, price mange ya selling_price - sab include kiya gaya hai
+      const cleanSku = form.sku.trim();
+      const numPrice = Number(form.price);
+      const numStock = Number(form.stock);
+      const numTax = Number(form.taxRate) || 0;
+
+      const payload = {
+        name: form.name.trim(),
+        sku: cleanSku,
+        barcode: cleanSku, // In case backend expects 'barcode'
+        price: numPrice,
+        selling_price: numPrice, // In case backend expects 'selling_price'
+        stock: numStock,
+        quantity: numStock, // In case backend expects 'quantity'
+        taxRate: numTax,
+        tax: numTax, // In case backend expects 'tax'
+        category: form.category || "Electronics",
+      };
+
       if (editingId) {
-        await api.put(`/products/${editingId}`, result.data);
+        await api.put(`/products/${editingId}`, payload);
         toast.success("Electronic product updated successfully.");
       } else {
-        await api.post("/products", result.data);
+        await api.post("/products", payload);
         toast.success("Electronic product added successfully.");
       }
 
@@ -326,15 +307,13 @@ export default function ProductsPage() {
       setEditingId(null);
       await fetchProducts();
     } catch (err) {
-      // Backend se aaye Zod errors bhi field-wise dikha do
-      if (err.response?.data?.errors) {
-        const backendErrors = {};
-        err.response.data.errors.forEach((fe) => {
-          backendErrors[fe.field] = fe.message;
-        });
-        setFieldErrors(backendErrors);
-      }
-      toast.error(err.response?.data?.message || "Product save failed.");
+      // Show exact message returned by backend
+      const errMsg =
+        err.response?.data?.message ||
+        err.response?.data?.error ||
+        "Product save failed (400 Bad Request).";
+      toast.error(errMsg);
+      console.error("400 Error Details:", err.response?.data);
     } finally {
       setSaving(false);
     }
@@ -343,20 +322,18 @@ export default function ProductsPage() {
   const handleEdit = (product) => {
     setForm({
       name: product.name || "",
-      sku: product.sku || "",
-      price: product.price ?? "",
-      stock: product.stock ?? "",
-      taxRate: product.taxRate ?? "18",
+      sku: product.sku || product.barcode || "",
+      price: product.price ?? product.selling_price ?? "",
+      stock: product.stock ?? product.quantity ?? "",
+      taxRate: String(product.taxRate ?? product.tax ?? "18"),
       category: product.category || "Electronics",
     });
-    setFieldErrors({});
-    setEditingId(product._id);
+    setEditingId(product._id || product.id);
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
   const cancelEdit = () => {
     setForm(initialForm);
-    setFieldErrors({});
     setEditingId(null);
   };
 
@@ -378,24 +355,24 @@ export default function ProductsPage() {
     return products.filter(
       (product) =>
         product.name?.toLowerCase().includes(value) ||
-        product.sku?.toLowerCase().includes(value) ||
-        product.category?.toLowerCase().includes(value)
+        (product.sku && product.sku.toLowerCase().includes(value)) ||
+        (product.barcode && product.barcode.toLowerCase().includes(value)) ||
+        (product.category && product.category.toLowerCase().includes(value))
     );
   }, [products, search]);
 
   const totalProducts = products.length;
-  const totalStock = products.reduce((sum, p) => sum + Number(p.stock || 0), 0);
-  const lowStockList = products.filter((p) => Number(p.stock || 0) <= 3);
+  const totalStock = products.reduce((sum, p) => sum + Number(p.stock || p.quantity || 0), 0);
+  const lowStockList = products.filter((p) => Number(p.stock || p.quantity || 0) <= 3);
   const lowStockProducts = lowStockList.length;
 
-  // Category-wise breakdown (for KPI popups)
   const categoryBreakdown = useMemo(() => {
     const map = {};
     products.forEach((p) => {
       const cat = p.category || "Uncategorized";
       if (!map[cat]) map[cat] = { count: 0, stock: 0 };
       map[cat].count += 1;
-      map[cat].stock += Number(p.stock || 0);
+      map[cat].stock += Number(p.stock || p.quantity || 0);
     });
     return Object.entries(map).sort((a, b) => b[1].count - a[1].count);
   }, [products]);
@@ -436,7 +413,7 @@ export default function ProductsPage() {
           </button>
         </header>
 
-        {/* STATS OVERVIEW — ab clickable */}
+        {/* STATS OVERVIEW */}
         <section className="grid grid-cols-2 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <KpiCard
             title="Appliance SKUs"
@@ -513,7 +490,6 @@ export default function ProductsPage() {
 
           <form
             onSubmit={handleSubmit}
-            noValidate
             className="grid grid-cols-1 gap-3 p-4 sm:grid-cols-2 sm:gap-4 sm:p-6 lg:grid-cols-3 xl:grid-cols-6"
           >
             <div className="sm:col-span-2 xl:col-span-2">
@@ -525,7 +501,6 @@ export default function ProductsPage() {
                 placeholder="e.g. Split AC 1.5 Ton 5 Star"
                 icon="package"
                 required
-                error={fieldErrors.name}
               />
             </div>
 
@@ -537,7 +512,6 @@ export default function ProductsPage() {
                 onChange={handleChange}
                 placeholder="8415 / 8418"
                 required
-                error={fieldErrors.sku}
               />
             </div>
 
@@ -549,10 +523,7 @@ export default function ProductsPage() {
                 name="category"
                 value={form.category}
                 onChange={handleChange}
-                className={`w-full rounded-xl border bg-slate-50/50 px-3 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 outline-none transition-all hover:border-slate-300 focus:bg-white focus:ring-4 cursor-pointer ${fieldErrors.category
-                  ? "border-red-400 focus:border-red-500 focus:ring-red-500/10"
-                  : "border-slate-200 focus:border-indigo-600 focus:ring-indigo-600/10"
-                  }`}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-3 py-2.5 text-xs sm:text-sm font-semibold text-slate-800 outline-none transition-all hover:border-slate-300 focus:bg-white focus:border-indigo-600 focus:ring-4 focus:ring-indigo-600/10 cursor-pointer"
               >
                 <option value="Electronics">Electronics</option>
                 <option value="Air Conditioner">Air Conditioner (AC)</option>
@@ -572,9 +543,6 @@ export default function ProductsPage() {
                 <option value="Inverter Battery">Inverter & Battery</option>
                 <option value="Other Electronics">Other Appliances</option>
               </select>
-              {fieldErrors.category && (
-                <p className="mt-1 text-[11px] font-semibold text-red-500">{fieldErrors.category}</p>
-              )}
             </div>
 
             <div className="sm:col-span-1 xl:col-span-1">
@@ -589,7 +557,6 @@ export default function ProductsPage() {
                 step="0.01"
                 icon="rupee"
                 required
-                error={fieldErrors.price}
               />
             </div>
 
@@ -602,9 +569,9 @@ export default function ProductsPage() {
                 placeholder="10"
                 type="number"
                 min="0"
+                step="1"
                 icon="chart"
                 required
-                error={fieldErrors.stock}
               />
             </div>
 
@@ -619,7 +586,6 @@ export default function ProductsPage() {
                 min="0"
                 max="100"
                 step="1"
-                error={fieldErrors.taxRate}
               />
             </div>
 
@@ -669,7 +635,7 @@ export default function ProductsPage() {
           </div>
         </section>
 
-        {/* 1. DESKTOP VIEW: FULL TABLE (Hidden on Small Screens) */}
+        {/* 1. DESKTOP VIEW: FULL TABLE */}
         <div className="hidden overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs md:block">
           <div className="overflow-x-auto">
             <table className="w-full min-w-[950px] border-collapse text-left text-xs sm:text-sm">
@@ -705,12 +671,13 @@ export default function ProductsPage() {
                   </tr>
                 ) : (
                   filteredProducts.map((product, index) => {
-                    const stock = Number(product.stock || 0);
+                    const stock = Number(product.stock ?? product.quantity ?? 0);
                     const lowStock = stock <= 3;
+                    const price = Number(product.price ?? product.selling_price ?? 0);
 
                     return (
                       <tr
-                        key={product._id}
+                        key={product._id || product.id || index}
                         className="transition-colors hover:bg-slate-50/70"
                       >
                         <td className="px-4 py-3.5 text-center text-xs font-mono text-slate-400">
@@ -721,7 +688,7 @@ export default function ProductsPage() {
                         </td>
                         <td className="px-4 py-3.5">
                           <span className="rounded-md bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-700">
-                            {product.sku || "—"}
+                            {product.sku || product.barcode || "—"}
                           </span>
                         </td>
                         <td className="px-4 py-3.5">
@@ -730,7 +697,7 @@ export default function ProductsPage() {
                           </span>
                         </td>
                         <td className="px-4 py-3.5 text-right font-extrabold text-slate-900">
-                          ₹{Number(product.price || 0).toFixed(2)}
+                          ₹{price.toFixed(2)}
                         </td>
                         <td className="px-4 py-3.5 text-center">
                           <span
@@ -744,7 +711,7 @@ export default function ProductsPage() {
                         </td>
                         <td className="px-4 py-3.5 text-center">
                           <span className="rounded-full bg-amber-50 border border-amber-200/60 px-2 py-0.5 text-[11px] font-bold text-amber-700">
-                            {product.taxRate || 18}%
+                            {product.taxRate ?? product.tax ?? 18}%
                           </span>
                         </td>
                         <td className="px-4 py-3.5 text-center">
@@ -758,7 +725,7 @@ export default function ProductsPage() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleDelete(product._id)}
+                              onClick={() => handleDelete(product._id || product.id)}
                               className="rounded-lg border border-red-200 px-2.5 py-1 text-xs font-bold text-red-600 transition hover:bg-red-50 cursor-pointer"
                             >
                               Delete
@@ -774,7 +741,7 @@ export default function ProductsPage() {
           </div>
         </div>
 
-        {/* 2. MOBILE VIEW: RESPONSIVE CARDS (Active on screens < 768px) */}
+        {/* 2. MOBILE VIEW: RESPONSIVE CARDS */}
         <div className="space-y-3 md:hidden">
           {loading ? (
             <div className="rounded-2xl border border-slate-200 bg-white p-12 text-center text-slate-400">
@@ -787,13 +754,14 @@ export default function ProductsPage() {
               <p className="mt-2 text-sm font-bold text-slate-700">No items available</p>
             </div>
           ) : (
-            filteredProducts.map((product) => {
-              const stock = Number(product.stock || 0);
+            filteredProducts.map((product, idx) => {
+              const stock = Number(product.stock ?? product.quantity ?? 0);
               const lowStock = stock <= 3;
+              const price = Number(product.price ?? product.selling_price ?? 0);
 
               return (
                 <div
-                  key={product._id}
+                  key={product._id || product.id || idx}
                   className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs transition-all space-y-3"
                 >
                   <div className="flex items-start justify-between gap-2">
@@ -805,16 +773,16 @@ export default function ProductsPage() {
                         {product.name}
                       </h3>
                       <p className="text-[11px] font-mono text-slate-400">
-                        HSN/SKU: {product.sku || "—"}
+                        HSN/SKU: {product.sku || product.barcode || "—"}
                       </p>
                     </div>
 
                     <div className="text-right">
                       <p className="text-base font-black text-indigo-600">
-                        ₹{Number(product.price || 0).toFixed(2)}
+                        ₹{price.toFixed(2)}
                       </p>
                       <span className="rounded-full bg-amber-50 px-2 py-0.2 text-[10px] font-bold text-amber-700">
-                        {product.taxRate || 18}% GST
+                        {product.taxRate ?? product.tax ?? 18}% GST
                       </span>
                     </div>
                   </div>
@@ -839,7 +807,7 @@ export default function ProductsPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleDelete(product._id)}
+                        onClick={() => handleDelete(product._id || product.id)}
                         className="rounded-lg border border-red-200 px-3 py-1 text-xs font-bold text-red-600 hover:bg-red-50 cursor-pointer"
                       >
                         Delete
@@ -854,20 +822,15 @@ export default function ProductsPage() {
 
       </div>
 
-      {/* ========================================
-          KPI CENTER POPUP MODAL
-      ======================================== */}
+      {/* KPI MODAL */}
       {activeKpi && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 bg-slate-900/50 backdrop-blur-sm transition-all duration-200">
-
           <div
             className="fixed inset-0 cursor-pointer"
             onClick={() => setActiveKpi(null)}
           />
 
           <div className="relative z-10 w-full max-w-lg overflow-hidden rounded-2xl sm:rounded-3xl bg-white shadow-2xl border border-slate-100 transition-all transform animate-in fade-in zoom-in-95 duration-200">
-
-            {/* Modal Header */}
             <div className="relative bg-gradient-to-r from-slate-900 to-[#101B3D] p-5 sm:p-6 text-white">
               <button
                 type="button"
@@ -910,31 +873,27 @@ export default function ProductsPage() {
               </div>
             </div>
 
-            {/* Modal Body */}
             <div className="p-5 sm:p-6 space-y-2.5 max-h-[65vh] overflow-y-auto">
-
-              {/* ===== Appliance SKUs list ===== */}
               {activeKpi === "skus" &&
                 (products.length === 0 ? (
                   <p className="py-8 text-center text-sm text-slate-400">No products registered yet.</p>
                 ) : (
-                  products.map((p) => (
+                  products.map((p, idx) => (
                     <div
-                      key={p._id}
+                      key={p._id || p.id || idx}
                       className="flex items-center justify-between gap-3 rounded-xl border border-slate-200/70 bg-slate-50/70 p-3"
                     >
                       <div className="min-w-0">
                         <p className="truncate text-sm font-bold text-slate-800">{p.name}</p>
-                        <p className="text-[11px] text-slate-400 font-mono">SKU: {p.sku || "—"} · {p.category}</p>
+                        <p className="text-[11px] text-slate-400 font-mono">SKU: {p.sku || p.barcode || "—"} · {p.category}</p>
                       </div>
                       <span className="shrink-0 text-sm font-extrabold text-indigo-600">
-                        ₹{Number(p.price || 0).toFixed(2)}
+                        ₹{Number(p.price || p.selling_price || 0).toFixed(2)}
                       </span>
                     </div>
                   ))
                 ))}
 
-              {/* ===== Stock breakdown ===== */}
               {activeKpi === "stock" &&
                 (categoryBreakdown.length === 0 ? (
                   <p className="py-8 text-center text-sm text-slate-400">No stock data available.</p>
@@ -958,7 +917,6 @@ export default function ProductsPage() {
                   })
                 ))}
 
-              {/* ===== Categories list ===== */}
               {activeKpi === "categories" &&
                 (categoryBreakdown.length === 0 ? (
                   <p className="py-8 text-center text-sm text-slate-400">No categories yet.</p>
@@ -976,7 +934,6 @@ export default function ProductsPage() {
                   ))
                 ))}
 
-              {/* ===== Low stock list ===== */}
               {activeKpi === "lowstock" &&
                 (lowStockList.length === 0 ? (
                   <div className="py-8 text-center">
@@ -986,9 +943,9 @@ export default function ProductsPage() {
                     <p className="mt-2 text-sm font-bold text-slate-700">All items well stocked</p>
                   </div>
                 ) : (
-                  lowStockList.map((p) => (
+                  lowStockList.map((p, idx) => (
                     <div
-                      key={p._id}
+                      key={p._id || p.id || idx}
                       className="flex items-center justify-between gap-3 rounded-xl border border-red-200/60 bg-red-50/50 p-3"
                     >
                       <div className="min-w-0">
@@ -996,14 +953,13 @@ export default function ProductsPage() {
                         <p className="text-[11px] text-slate-400 font-mono">{p.category}</p>
                       </div>
                       <span className="shrink-0 rounded-full bg-red-100 px-2.5 py-0.5 text-[11px] font-bold text-red-600">
-                        {p.stock} left
+                        {p.stock ?? p.quantity} left
                       </span>
                     </div>
                   ))
                 ))}
             </div>
 
-            {/* Modal Footer */}
             <div className="border-t border-slate-100 bg-slate-50/60 p-4 sm:p-5 flex items-center justify-end">
               <button
                 type="button"
