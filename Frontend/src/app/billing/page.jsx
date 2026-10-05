@@ -1411,48 +1411,47 @@ export default function BillingPage() {
               </div>
             )}
           </div>
-
-          <div className="grid sm:grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-5">
-            <TextInput
-              label="Enter your Customer Name."
-              value={selectedCustomer.name}
-              onChange={(e) => updateCustomerField("name", e.target.value)}
-              placeholder="Enter your Customer Name."
-              error={fieldErrors.name}
-            />
-            <TextInput
-              label="Phone Number"
-              value={selectedCustomer.phone}
-              onChange={(e) => updateCustomerField("phone", e.target.value)}
-              placeholder="Enter your Phone Number."
-              mono
-              inputMode="numeric"
-              error={fieldErrors.phone}
-            />
-            <TextInput
-              label="Email Address"
-              value={selectedCustomer.email}
-              onChange={(e) => updateCustomerField("email", e.target.value)}
-              placeholder="Enter your Customer Email."
-              error={fieldErrors.email}
-            />
-            <TextInput
-              label="Address / City"
-              value={selectedCustomer.address}
-              onChange={(e) => updateCustomerField("address", e.target.value)}
-              placeholder="Enter address or city..."
-              error={fieldErrors.address}
-            />
-            {/* <TextInput
-              label="Buyer GSTIN"
-              value={selectedCustomer.gstin}
-              onChange={(e) => updateCustomerField("gstin", e.target.value.toUpperCase())}
-              placeholder="08AAACR5055K1Z8"
-              mono
-              uppercase
-              error={fieldErrors.gstin}
-            /> */}
-          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
+  <TextInput
+    label="Enter your Customer Name."
+    value={selectedCustomer.name}
+    onChange={(e) => updateCustomerField("name", e.target.value)}
+    placeholder="Enter your Customer Name."
+    error={fieldErrors.name}
+  />
+  <TextInput
+    label="Phone Number"
+    value={selectedCustomer.phone}
+    onChange={(e) => updateCustomerField("phone", e.target.value)}
+    placeholder="Enter your Phone Number."
+    mono
+    inputMode="numeric"
+    error={fieldErrors.phone}
+  />
+  <TextInput
+    label="Email Address"
+    value={selectedCustomer.email}
+    onChange={(e) => updateCustomerField("email", e.target.value)}
+    placeholder="Enter your Customer Email."
+    error={fieldErrors.email}
+  />
+  <TextInput
+    label="Address / City"
+    value={selectedCustomer.address}
+    onChange={(e) => updateCustomerField("address", e.target.value)}
+    placeholder="Enter address or city..."
+    error={fieldErrors.address}
+  />
+  {/* <TextInput
+    label="Buyer GSTIN"
+    value={selectedCustomer.gstin}
+    onChange={(e) => updateCustomerField("gstin", e.target.value.toUpperCase())}
+    placeholder="08AAACR5055K1Z8"
+    mono
+    uppercase
+    error={fieldErrors.gstin}
+  /> */}
+</div>
         </section>
 
         {/* WORKSPACE */}
