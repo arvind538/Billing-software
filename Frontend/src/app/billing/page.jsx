@@ -1433,7 +1433,7 @@ export default function BillingPage() {
               label="Email Address"
               value={selectedCustomer.email}
               onChange={(e) => updateCustomerField("email", e.target.value)}
-              placeholder="Enter your Email."
+              placeholder="Enter your Customer Email."
               error={fieldErrors.email}
             />
             <TextInput
