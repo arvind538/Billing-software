@@ -7,12 +7,12 @@ import {
   updateCustomer,
   deleteCustomer,
 } from "../controllers/customerController.js";
-import { validate, customerSchema, customerUpdateSchema } from "../middleware/validate.js";
+// import { validate, customerSchema, customerUpdateSchema } from "../middleware/validate.js";
 
 router.get("/", getCustomers);
 router.get("/:id", getCustomerById);
-router.post("/", validate(customerSchema), createCustomer);
-router.put("/:id", validate(customerUpdateSchema), updateCustomer);
+router.post("/", createCustomer);
+router.put("/:id", updateCustomer);
 router.delete("/:id", deleteCustomer);
 
 export default router;

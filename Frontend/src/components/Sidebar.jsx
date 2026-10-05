@@ -34,51 +34,51 @@ const navLinks = [
             </svg>
         ),
     },
-    {
-        href: "/products",
-        label: "Electronic Products",
-        description: "AC, Fridges, Coolers & Fans",
-        icon: (
-            <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                className="h-[20px] w-[20px]"
-            >
-                <path
-                    d="m21 8-9-5-9 5 9 5 9-5Z"
-                    strokeWidth="1.8"
-                />
-                <path
-                    d="m3 8 9 5 9-5M3 13l9 5 9-5"
-                    strokeWidth="1.8"
-                />
-            </svg>
-        ),
-    },
-    {
-        href: "/customers",
-        label: "Customers",
-        description: "Manage buyers",
-        icon: (
-            <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                className="h-[20px] w-[20px]"
-            >
-                <circle cx="9" cy="8" r="3" strokeWidth="1.8" />
-                <path
-                    d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"
-                    strokeWidth="1.8"
-                />
-                <path
-                    d="M16 5.5a3 3 0 0 1 0 5.8M18 14c1.8.8 3 2.7 3 6"
-                    strokeWidth="1.8"
-                />
-            </svg>
-        ),
-    },
+    // {
+    //     href: "/products",
+    //     label: "Electronic Products",
+    //     description: "AC, Fridges, Coolers & Fans",
+    //     icon: (
+    //         <svg
+    //             viewBox="0 0 24 24"
+    //             fill="none"
+    //             stroke="currentColor"
+    //             className="h-[20px] w-[20px]"
+    //         >
+    //             <path
+    //                 d="m21 8-9-5-9 5 9 5 9-5Z"
+    //                 strokeWidth="1.8"
+    //             />
+    //             <path
+    //                 d="m3 8 9 5 9-5M3 13l9 5 9-5"
+    //                 strokeWidth="1.8"
+    //             />
+    //         </svg>
+    //     ),
+    // },
+    // {
+    //     href: "/customers",
+    //     label: "Customers",
+    //     description: "Manage buyers",
+    //     icon: (
+    //         <svg
+    //             viewBox="0 0 24 24"
+    //             fill="none"
+    //             stroke="currentColor"
+    //             className="h-[20px] w-[20px]"
+    //         >
+    //             <circle cx="9" cy="8" r="3" strokeWidth="1.8" />
+    //             <path
+    //                 d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"
+    //                 strokeWidth="1.8"
+    //             />
+    //             <path
+    //                 d="M16 5.5a3 3 0 0 1 0 5.8M18 14c1.8.8 3 2.7 3 6"
+    //                 strokeWidth="1.8"
+    //             />
+    //         </svg>
+    //     ),
+    // },
     {
         href: "/invoices",
         label: "Invoices",

@@ -8,6 +8,9 @@ import autoTable from "jspdf-autotable";
 import { toast } from "react-toastify";
 import { z } from "zod";
 
+// =========================================================
+// CONSTANTS
+// =========================================================
 const emptyCustomer = {
   _id: "",
   name: "",
@@ -17,12 +20,89 @@ const emptyCustomer = {
   gstin: "",
 };
 
+const emptyProductForm = {
+  name: "",
+  sku: "",
+  hsn: "",
+  price: "",
+  taxRate: "18",
+  qty: "1",
+};
+
+const GST_RATES = [0, 5, 10, 12, 18, 20, 28, 30];
+
+// Stock UI hata diya hai, par backend ko stock field chahiye hota hai.
+// Isliye naye product pe ye default value jayegi (UI me kahin show nahi hoti).
+const DEFAULT_STOCK = 9999;
+
+const TERMS = [
+  "Goods once sold will not be taken back or exchanged.",
+  "Warranty is as per the manufacturer's terms only. No warranty on physical damage, burning or misuse.",
+  "Please check the goods at the time of delivery. No complaint will be entertained afterwards.",
+  "Payment is due immediately. Interest may be charged on delayed payments.",
+  "All disputes are subject to Jaipur jurisdiction only.",
+  "E. & O.E. (Errors and omissions excepted).",
+];
+
+const DECLARATION_TEXT =
+  "We declare that this invoice shows the actual price of the goods and services described and that all particulars are true and correct.";
+
 // =========================================================
-// ZOD CHECKOUT SCHEMA
+// ZOD SCHEMAS
 // =========================================================
 const gstinRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
 const phoneRegex = /^[6-9]\d{9}$/;
 
+// Naya customer save karne ke liye (name + phone required)
+const customerSchema = z.object({
+  name: z
+    .string({ error: "Name is required" })
+    .trim()
+    .min(2, "Name must be at least 2 characters")
+    .max(100, "Name too long"),
+  phone: z
+    .string({ error: "Phone is required" })
+    .trim()
+    .regex(phoneRegex, "Enter a valid 10-digit phone number"),
+  email: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .email("Invalid email address")
+    .optional()
+    .or(z.literal("")),
+  address: z.string().trim().max(250, "Address too long").optional().or(z.literal("")),
+  gstin: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .optional()
+    .refine((val) => !val || gstinRegex.test(val), { error: "Invalid GSTIN format" }),
+});
+
+// Product add + edit dono ke liye
+const productSchema = z.object({
+  name: z
+    .string({ error: "Product name is required" })
+    .trim()
+    .min(2, "Product name must be at least 2 characters")
+    .max(120, "Product name too long"),
+  sku: z.string().trim().max(50, "SKU too long").optional(),
+  hsn: z.string().trim().max(20, "HSN too long").optional(),
+  price: z.coerce
+    .number({ error: "Price must be a number" })
+    .positive("Price must be greater than 0"),
+  taxRate: z.coerce
+    .number({ error: "GST must be a number" })
+    .min(0, "GST cannot be negative")
+    .max(100, "GST cannot be more than 100"),
+  qty: z.coerce
+    .number({ error: "Quantity must be a number" })
+    .int("Quantity must be a whole number")
+    .min(1, "Quantity must be at least 1"),
+});
+
+// Checkout validation (customer optional = walk-in allowed)
 const checkoutSchema = z.object({
   customerDetails: z.object({
     name: z.string().trim().optional(),
@@ -53,7 +133,10 @@ const checkoutSchema = z.object({
     .array(
       z.object({
         productId: z.string({ error: "Invalid product" }).min(1),
-        qty: z.coerce.number({ error: "Quantity must be a number" }).int().positive("Quantity must be at least 1"),
+        qty: z.coerce
+          .number({ error: "Quantity must be a number" })
+          .int()
+          .positive("Quantity must be at least 1"),
       })
     )
     .min(1, "Cart is empty — please add at least one product"),
@@ -84,6 +167,168 @@ const COMPANY = {
   },
 };
 
+// =========================================================
+// HELPERS
+// =========================================================
+const mapIssues = (error) => {
+  const errors = {};
+  error.issues.forEach((issue) => {
+    const key = issue.path[issue.path.length - 1];
+    if (!errors[key]) errors[key] = issue.message;
+  });
+  return errors;
+};
+
+const normalizeCustomer = (c = {}) => ({
+  _id: c._id || "",
+  name: c.name || "",
+  phone: c.phone || "",
+  email: c.email || "",
+  address: c.address || "",
+  gstin: c.gstin || c.gst || c.gstNo || c.gstNumber || "",
+});
+
+const toCartItem = (product, qty = 1) => ({
+  productId: product._id,
+  name: product.name,
+  sku: product.sku || "-",
+  hsn: product.hsn || product.hsnCode || "",
+  price: Number(product.price || 0),
+  taxRate: Number(product.taxRate || 0),
+  stock: Number(product.stock ?? DEFAULT_STOCK),
+  qty: Number(qty) || 1,
+});
+
+const money = (n) =>
+  `₹${Number(n || 0).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+// "BR/2026-27/001" jaise number me "/" file name me allowed nahi hota
+const toSafeFileName = (value) => String(value).replace(/[\/\\:*?"<>|]/g, "-");
+
+// ---------- Invoice number: BR/2026-27/001 ----------
+const getFinancialYear = (date = new Date()) => {
+  const y = date.getFullYear();
+  const start = date.getMonth() >= 3 ? y : y - 1; // FY April se start
+  return `${start}-${String((start + 1) % 100).padStart(2, "0")}`;
+};
+
+const formatInvoiceNumber = (raw) => {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  if (/^BR\/\d{4}-\d{2}\/\d+$/i.test(value)) return value; // already sahi format
+  const m = value.match(/(\d+)\s*$/);
+  if (!m) return value;
+  return `BR/${getFinancialYear()}/${String(Number(m[1])).padStart(3, "0")}`;
+};
+
+// "jaipur" -> "Jaipur", "ASHISH KUMAR" -> "Ashish Kumar" (mixed case ko touch nahi karta)
+const toTitleCase = (str = "") => {
+  const s = String(str).trim();
+  if (!s) return "";
+  if (s !== s.toLowerCase() && s !== s.toUpperCase()) return s;
+  return s.toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
+};
+
+// ---------- PDF font (₹ symbol ke liye) ----------
+const PDF_FONT = "NotoSans";
+const fontCache = {};
+
+const fetchFontBase64 = async (url) => {
+  if (fontCache[url]) return fontCache[url];
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Font load failed: ${url}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  const b64 = btoa(binary);
+  fontCache[url] = b64;
+  return b64;
+};
+
+const registerPdfFonts = async (doc) => {
+  const [regular, bold] = await Promise.all([
+    fetchFontBase64("/fonts/NotoSans-Regular.ttf"),
+    fetchFontBase64("/fonts/NotoSans-Bold.ttf"),
+  ]);
+  doc.addFileToVFS("NotoSans-Regular.ttf", regular);
+  doc.addFont("NotoSans-Regular.ttf", PDF_FONT, "normal");
+  doc.addFileToVFS("NotoSans-Bold.ttf", bold);
+  doc.addFont("NotoSans-Bold.ttf", PDF_FONT, "bold");
+};
+
+const inputBase =
+  "w-full rounded-xl border bg-slate-50/50 px-3.5 py-2.5 text-sm font-semibold text-slate-800 outline-none transition-all placeholder:font-normal placeholder:text-slate-400 hover:border-slate-300 focus:bg-white focus:ring-4";
+
+function TextInput({
+  label,
+  value,
+  onChange,
+  error,
+  placeholder,
+  type = "text",
+  mono = false,
+  required = false,
+  inputMode,
+  uppercase = false,
+  min,
+}) {
+  return (
+    <div className="w-full">
+      <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-slate-500">
+        {label}
+        {required && <span className="ml-1 text-red-500">*</span>}
+      </label>
+      <input
+        type={type}
+        value={value}
+        min={min}
+        inputMode={inputMode}
+        onChange={onChange}
+        placeholder={placeholder}
+        className={`${inputBase} ${mono ? "font-mono" : ""} ${uppercase ? "uppercase" : ""} ${error
+          ? "border-red-400 focus:border-red-500 focus:ring-red-500/10"
+          : "border-slate-200 focus:border-indigo-600 focus:ring-indigo-600/10"
+          }`}
+      />
+      {error && <p className="mt-1 text-[11px] font-semibold text-red-500">{error}</p>}
+    </div>
+  );
+}
+
+function GstSelect({ value, onChange, error }) {
+  return (
+    <div className="w-full">
+      <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-slate-500">
+        GST %
+      </label>
+      <select
+        value={value}
+        onChange={onChange}
+        className={`${inputBase} cursor-pointer ${error
+          ? "border-red-400 focus:border-red-500 focus:ring-red-500/10"
+          : "border-slate-200 focus:border-indigo-600 focus:ring-indigo-600/10"
+          }`}
+      >
+        {GST_RATES.map((r) => (
+          <option key={r} value={r}>
+            {r}%
+          </option>
+        ))}
+      </select>
+      {error && <p className="mt-1 text-[11px] font-semibold text-red-500">{error}</p>}
+    </div>
+  );
+}
+
+// =========================================================
+// MAIN COMPONENT
+// =========================================================
 export default function BillingPage() {
   const [products, setProducts] = useState([]);
   const [customers, setCustomers] = useState([]);
@@ -93,8 +338,17 @@ export default function BillingPage() {
 
   const [cart, setCart] = useState([]);
   const [selectedCustomer, setSelectedCustomer] = useState(emptyCustomer);
-  const [fieldErrors, setFieldErrors] = useState({}); // 👈 Zod field-wise errors
+  const [fieldErrors, setFieldErrors] = useState({});
 
+  const [productForm, setProductForm] = useState(emptyProductForm);
+  const [productErrors, setProductErrors] = useState({});
+  const [addingProduct, setAddingProduct] = useState(false);
+
+  const [editItem, setEditItem] = useState(null);
+  const [editErrors, setEditErrors] = useState({});
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  const [savingCustomer, setSavingCustomer] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState("cash");
 
   const [loading, setLoading] = useState(true);
@@ -110,49 +364,27 @@ export default function BillingPage() {
           api.get("/products"),
           api.get("/customers"),
         ]);
-
-        setProducts(
-          Array.isArray(productsRes.data) ? productsRes.data : []
-        );
-
-        setCustomers(
-          Array.isArray(customersRes.data) ? customersRes.data : []
-        );
+        setProducts(Array.isArray(productsRes.data) ? productsRes.data : []);
+        setCustomers(Array.isArray(customersRes.data) ? customersRes.data : []);
       } catch (error) {
         toast.error(
-          `Data loading error: ${error.response?.data?.message || error.message
-          }`
+          `Data loading error: ${error.response?.data?.message || error.message}`
         );
       } finally {
         setLoading(false);
       }
     };
-
     loadData();
   }, []);
 
-  // =========================================================
-  // RESTORE SELECTED CUSTOMER
-  // =========================================================
+  // Customers page se aaya hua customer restore
   useEffect(() => {
-    const savedCustomer = sessionStorage.getItem("selectedCustomer");
-
-    if (savedCustomer) {
+    const saved = sessionStorage.getItem("selectedCustomer");
+    if (saved) {
       try {
-        const customer = JSON.parse(savedCustomer);
-
-        const customerData = {
-          _id: customer._id || "",
-          name: customer.name || "",
-          phone: customer.phone || "",
-          email: customer.email || "",
-          address: customer.address || "",
-          gstin: customer.gstin || customer.gst || customer.gstNo || customer.gstNumber || "",
-        };
-
+        const customerData = normalizeCustomer(JSON.parse(saved));
         setSelectedCustomer(customerData);
         setActiveCustomer(customerData);
-
         sessionStorage.removeItem("selectedCustomer");
       } catch (error) {
         console.error("Selected customer error:", error);
@@ -160,77 +392,65 @@ export default function BillingPage() {
     }
   }, []);
 
+  // ESC se edit popup band
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.key === "Escape") setEditItem(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   // =========================================================
-  // FILTER PRODUCTS
+  // FILTERS
   // =========================================================
   const filteredProducts = useMemo(() => {
     const value = search.toLowerCase().trim();
-
-    return products.filter((product) => {
-      return (
-        product.name?.toLowerCase().includes(value) ||
-        product.sku?.toLowerCase().includes(value)
-      );
-    });
+    if (!value) return [];
+    return products
+      .filter(
+        (p) =>
+          p.name?.toLowerCase().includes(value) ||
+          p.sku?.toLowerCase().includes(value)
+      )
+      .slice(0, 8);
   }, [products, search]);
 
-  // =========================================================
-  // FILTER CUSTOMERS
-  // =========================================================
   const filteredCustomers = useMemo(() => {
     const value = customerSearch.toLowerCase().trim();
-
-    if (!value) {
-      return customers.slice(0, 8);
-    }
-
-    return customers.filter((customer) => {
-      return (
-        customer.name?.toLowerCase().includes(value) ||
-        customer.phone?.toLowerCase().includes(value) ||
-        customer.email?.toLowerCase().includes(value) ||
-        customer.gstin?.toLowerCase().includes(value) ||
-        customer.gst?.toLowerCase().includes(value)
-      );
-    });
+    if (!value) return [];
+    return customers
+      .filter(
+        (c) =>
+          c.name?.toLowerCase().includes(value) ||
+          c.phone?.toLowerCase().includes(value) ||
+          c.email?.toLowerCase().includes(value) ||
+          c.gstin?.toLowerCase().includes(value) ||
+          c.gst?.toLowerCase().includes(value)
+      )
+      .slice(0, 8);
   }, [customers, customerSearch]);
 
   // =========================================================
-  // SELECT CUSTOMER
+  // CUSTOMER ACTIONS
   // =========================================================
   const selectCustomer = (customer) => {
-    const customerData = {
-      _id: customer._id || "",
-      name: customer.name || "",
-      phone: customer.phone || "",
-      email: customer.email || "",
-      address: customer.address || "",
-      gstin: customer.gstin || customer.gst || customer.gstNo || customer.gstNumber || "",
-    };
-
-    setSelectedCustomer(customerData);
-    setActiveCustomer(customerData);
+    const data = normalizeCustomer(customer);
+    setSelectedCustomer(data);
+    setActiveCustomer(data);
     setCustomerSearch("");
+    setFieldErrors({});
   };
 
-  // =========================================================
-  // MANUAL EDIT OF CUSTOMER FIELDS
-  // =========================================================
   const updateCustomerField = (field, value) => {
-    setSelectedCustomer((prev) => {
-      const next = { ...prev, [field]: value };
-      setActiveCustomer(next);
-      return next;
-    });
-
+    const next = { ...selectedCustomer, [field]: value };
+    setSelectedCustomer(next);
+    setActiveCustomer(next);
     if (fieldErrors[field]) {
       setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
     }
   };
 
-  // =========================================================
-  // CLEAR CUSTOMER
-  // =========================================================
   const clearCustomer = () => {
     setSelectedCustomer(emptyCustomer);
     setActiveCustomer(null);
@@ -238,219 +458,270 @@ export default function BillingPage() {
     setFieldErrors({});
   };
 
-  // =========================================================
-  // ADD PRODUCT TO CART
-  // =========================================================
-  const addToCart = (product) => {
-    if (Number(product.stock) <= 0) {
-      toast.warn("This product is out of stock.");
+  // Naya customer database me save karo
+  const handleSaveCustomer = async () => {
+    const result = customerSchema.safeParse({
+      name: selectedCustomer.name,
+      phone: selectedCustomer.phone,
+      email: selectedCustomer.email,
+      address: selectedCustomer.address,
+      gstin: selectedCustomer.gstin,
+    });
+
+    if (!result.success) {
+      const errors = mapIssues(result.error);
+      setFieldErrors(errors);
+      toast.error(Object.values(errors)[0] || "Please fix highlighted fields.");
       return;
     }
 
-    setCart((prev) => {
-      const existing = prev.find(
-        (item) => item.productId === product._id
-      );
+    setFieldErrors({});
 
-      if (existing) {
-        if (existing.qty >= Number(product.stock)) {
-          toast.warn("Stock limit reached for this product.");
-          return prev;
-        }
+    try {
+      setSavingCustomer(true);
+      const res = await api.post("/customers", result.data);
+      let created = res.data?.customer || res.data?.data || res.data;
 
-        return prev.map((item) =>
-          item.productId === product._id
-            ? {
-              ...item,
-              qty: item.qty + 1,
-            }
-            : item
-        );
+      if (!created?._id) {
+        const list = await api.get("/customers");
+        const arr = Array.isArray(list.data) ? list.data : [];
+        setCustomers(arr);
+        created = arr.find((c) => c.phone === result.data.phone);
+      } else {
+        setCustomers((prev) => [created, ...prev]);
       }
 
-      return [
-        ...prev,
-        {
-          productId: product._id,
-          name: product.name,
-          sku: product.sku || "-",
-          // 👇 FIX: sku ko bhi fallback mein add kiya, kyunki product model mein
-          // alag se hsn/hsnCode field nahi hai — SKU hi HSN ki jagah use hoga
-          hsn: product.hsn || product.hsnCode || product.sku || "-",
-          price: Number(product.price || 0),
-          taxRate: Number(product.taxRate || 0),
-          stock: Number(product.stock || 0),
-          qty: 1,
-        },
-      ];
+      const data = normalizeCustomer({ ...result.data, ...created });
+      setSelectedCustomer(data);
+      setActiveCustomer(data);
+      toast.success("Customer saved successfully.");
+    } catch (error) {
+      if (error.response?.data?.errors) {
+        const backendErrors = {};
+        error.response.data.errors.forEach((fe) => {
+          backendErrors[fe.field] = fe.message;
+        });
+        setFieldErrors(backendErrors);
+      }
+      toast.error(error.response?.data?.message || "Customer save failed.");
+    } finally {
+      setSavingCustomer(false);
+    }
+  };
+
+  // =========================================================
+  // CART ACTIONS
+  // =========================================================
+  const addToCart = (product, qty = 1) => {
+    setCart((prev) => {
+      const existing = prev.find((i) => i.productId === product._id);
+      if (existing) {
+        return prev.map((i) =>
+          i.productId === product._id ? { ...i, qty: i.qty + Number(qty) } : i
+        );
+      }
+      return [...prev, toCartItem(product, qty)];
     });
   };
 
-  // =========================================================
-  // UPDATE QTY
-  // =========================================================
+  const addExistingProduct = (product) => {
+    addToCart(product, 1);
+    setSearch("");
+    toast.success(`${product.name} added to bill`);
+  };
+
   const updateQty = (productId, qty) => {
-    const newQty = Number(qty);
-
-    if (newQty <= 0 || Number.isNaN(newQty)) {
-      setCart((prev) =>
-        prev.filter((item) => item.productId !== productId)
-      );
-      return;
-    }
-
+    const n = Math.floor(Number(qty));
+    if (Number.isNaN(n)) return;
+    const safe = Math.min(Math.max(n, 1), 99999);
     setCart((prev) =>
-      prev.map((item) =>
-        item.productId === productId
-          ? {
-            ...item,
-            qty:
-              item.stock && newQty > item.stock
-                ? item.stock
-                : newQty,
-          }
-          : item
-      )
+      prev.map((i) => (i.productId === productId ? { ...i, qty: safe } : i))
     );
   };
 
-  // =========================================================
-  // REMOVE ITEM
-  // =========================================================
   const removeItem = (productId) => {
-    setCart((prev) =>
-      prev.filter((item) => item.productId !== productId)
-    );
+    setCart((prev) => prev.filter((i) => i.productId !== productId));
+  };
+
+  const deleteItem = (item) => {
+    removeItem(item.productId);
+    toast.info(`${item.name} removed from bill`);
+  };
+
+  // =========================================================
+  // ADD NEW PRODUCT -> DB me save + bill me auto add
+  // =========================================================
+  const handleProductFormChange = (field, value) => {
+    setProductForm((prev) => ({ ...prev, [field]: value }));
+    if (productErrors[field]) {
+      setProductErrors((prev) => ({ ...prev, [field]: undefined }));
+    }
+  };
+
+  const handleAddProduct = async (e) => {
+    e.preventDefault();
+
+    const result = productSchema.safeParse(productForm);
+    if (!result.success) {
+      const errors = mapIssues(result.error);
+      setProductErrors(errors);
+      toast.error(Object.values(errors)[0] || "Please fix highlighted fields.");
+      return;
+    }
+
+    setProductErrors({});
+    const { name, sku, hsn, price, taxRate, qty } = result.data;
+
+    const payload = {
+      name,
+      sku: sku || `SKU-${Date.now().toString().slice(-6)}`,
+      hsn: hsn || "",
+      price,
+      taxRate,
+      stock: DEFAULT_STOCK,
+    };
+
+    try {
+      setAddingProduct(true);
+      const res = await api.post("/products", payload);
+      let created = res.data?.product || res.data?.data || res.data;
+
+      if (!created?._id) {
+        const list = await api.get("/products");
+        const arr = Array.isArray(list.data) ? list.data : [];
+        setProducts(arr);
+        created = arr.find((p) => p.sku === payload.sku) || arr.find((p) => p.name === name);
+      } else {
+        setProducts((prev) => [created, ...prev]);
+      }
+
+      if (!created?._id) throw new Error("Product save hua, par ID nahi mili.");
+
+      // Product turant bill table me add
+      addToCart({ ...payload, ...created }, qty);
+      setProductForm(emptyProductForm);
+      toast.success(`${name} added to bill`);
+    } catch (error) {
+      console.error("Product add error:", error.response?.data || error.message);
+      toast.error(error.response?.data?.message || error.message || "Product save failed.");
+    } finally {
+      setAddingProduct(false);
+    }
+  };
+
+  // =========================================================
+  // EDIT ITEM
+  // =========================================================
+  const openEdit = (item) => {
+    setEditItem({
+      productId: item.productId,
+      name: item.name,
+      sku: item.sku === "-" ? "" : item.sku,
+      hsn: item.hsn || "",
+      price: String(item.price),
+      taxRate: String(item.taxRate),
+      qty: String(item.qty),
+      stock: item.stock,
+    });
+    setEditErrors({});
+  };
+
+  const handleEditChange = (field, value) => {
+    setEditItem((prev) => ({ ...prev, [field]: value }));
+    if (editErrors[field]) {
+      setEditErrors((prev) => ({ ...prev, [field]: undefined }));
+    }
+  };
+
+  const saveEdit = async (e) => {
+    e.preventDefault();
+
+    const result = productSchema.safeParse(editItem);
+    if (!result.success) {
+      const errors = mapIssues(result.error);
+      setEditErrors(errors);
+      toast.error(Object.values(errors)[0] || "Please fix highlighted fields.");
+      return;
+    }
+
+    const { name, sku, hsn, price, taxRate, qty } = result.data;
+    const payload = {
+      name,
+      hsn: hsn || "",
+      price,
+      taxRate,
+      stock: editItem.stock ?? DEFAULT_STOCK,
+    };
+    if (sku) payload.sku = sku;
+
+    try {
+      setSavingEdit(true);
+      await api.put(`/products/${editItem.productId}`, payload);
+
+      setProducts((prev) =>
+        prev.map((p) => (p._id === editItem.productId ? { ...p, ...payload } : p))
+      );
+
+      setCart((prev) =>
+        prev.map((i) =>
+          i.productId === editItem.productId
+            ? { ...i, name, sku: sku || i.sku, hsn: hsn || "", price, taxRate, qty }
+            : i
+        )
+      );
+
+      toast.success("Item updated successfully.");
+      setEditItem(null);
+    } catch (error) {
+      toast.error(error.response?.data?.message || "Item update failed.");
+    } finally {
+      setSavingEdit(false);
+    }
   };
 
   // =========================================================
   // CALCULATIONS
   // =========================================================
-  const totalItems = cart.reduce(
-    (sum, item) => sum + Number(item.qty || 0),
-    0
-  );
-
-  const subtotal = cart.reduce(
-    (sum, item) =>
-      sum + Number(item.price || 0) * Number(item.qty || 0),
-    0
-  );
-
-  const taxTotal = cart.reduce(
-    (sum, item) =>
-      sum +
-      (Number(item.price || 0) *
-        Number(item.qty || 0) *
-        Number(item.taxRate || 0)) /
-      100,
-    0
-  );
-
+  const totalItems = cart.reduce((sum, i) => sum + Number(i.qty || 0), 0);
+  const subtotal = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
+  const taxTotal = cart.reduce((sum, i) => sum + (i.price * i.qty * i.taxRate) / 100, 0);
   const grandTotal = subtotal + taxTotal;
 
   const cgstTotal = taxTotal / 2;
   const sgstTotal = taxTotal / 2;
-  const effectiveTaxRate =
-    subtotal > 0 ? (taxTotal / subtotal) * 100 : 0;
+  const effectiveTaxRate = subtotal > 0 ? (taxTotal / subtotal) * 100 : 0;
   const halfTaxRate = effectiveTaxRate / 2;
 
   // =========================================================
   // NUMBER TO WORDS
   // =========================================================
   const numberToWords = (amount) => {
-    const ones = [
-      "",
-      "One",
-      "Two",
-      "Three",
-      "Four",
-      "Five",
-      "Six",
-      "Seven",
-      "Eight",
-      "Nine",
-      "Ten",
-      "Eleven",
-      "Twelve",
-      "Thirteen",
-      "Fourteen",
-      "Fifteen",
-      "Sixteen",
-      "Seventeen",
-      "Eighteen",
-      "Nineteen",
-    ];
-
-    const tens = [
-      "",
-      "",
-      "Twenty",
-      "Thirty",
-      "Forty",
-      "Fifty",
-      "Sixty",
-      "Seventy",
-      "Eighty",
-      "Ninety",
-    ];
+    const ones = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
+    const tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
 
     const convert = (num) => {
       if (num < 20) return ones[num];
-      if (num < 100)
-        return (
-          tens[Math.floor(num / 10)] +
-          (num % 10 ? " " + ones[num % 10] : "")
-        );
-      if (num < 1000)
-        return (
-          ones[Math.floor(num / 100)] +
-          " Hundred" +
-          (num % 100 ? " " + convert(num % 100) : "")
-        );
-      if (num < 100000)
-        return (
-          convert(Math.floor(num / 1000)) +
-          " Thousand" +
-          (num % 1000 ? " " + convert(num % 1000) : "")
-        );
-      if (num < 10000000)
-        return (
-          convert(Math.floor(num / 100000)) +
-          " Lakh" +
-          (num % 100000 ? " " + convert(num % 100000) : "")
-        );
-      return (
-        convert(Math.floor(num / 10000000)) +
-        " Crore" +
-        (num % 10000000 ? " " + convert(num % 10000000) : "")
-      );
+      if (num < 100) return tens[Math.floor(num / 10)] + (num % 10 ? " " + ones[num % 10] : "");
+      if (num < 1000) return ones[Math.floor(num / 100)] + " Hundred" + (num % 100 ? " " + convert(num % 100) : "");
+      if (num < 100000) return convert(Math.floor(num / 1000)) + " Thousand" + (num % 1000 ? " " + convert(num % 1000) : "");
+      if (num < 10000000) return convert(Math.floor(num / 100000)) + " Lakh" + (num % 100000 ? " " + convert(num % 100000) : "");
+      return convert(Math.floor(num / 10000000)) + " Crore" + (num % 10000000 ? " " + convert(num % 10000000) : "");
     };
 
     const rupees = Math.floor(amount);
     const paise = Math.round((amount - rupees) * 100);
 
-    let result =
-      rupees === 0
-        ? "Zero Rupees"
-        : `${convert(rupees)} Rupees`;
-
-    if (paise > 0) {
-      result += ` and ${convert(paise)} Paise`;
-    }
-
+    let result = rupees === 0 ? "Zero Rupees" : `${convert(rupees)} Rupees`;
+    if (paise > 0) result += ` and ${convert(paise)} Paise`;
     return `${result} Only`;
   };
 
   // =========================================================
   // GENERATE PDF
   // =========================================================
-  const generateInvoicePDF = (invoiceNumber) => {
-    const doc = new jsPDF({
-      orientation: "portrait",
-      unit: "mm",
-      format: "a4",
-    });
+  const generateInvoicePDF = async (invoiceNumber) => {
+    const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+    await registerPdfFonts(doc);
 
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
@@ -461,176 +732,131 @@ export default function BillingPage() {
     const COLOR_NAVY_TEXT = [16, 76, 126];
     const COLOR_ORANGE = [237, 125, 32];
     const COLOR_BORDER = [205, 218, 228];
-    const COLOR_DARK_TEXT = [25, 30, 40]; // 👈 premium darker text for amounts/names
-
-    // 👇 Dark navy banner background used for BUYER (BILL TO), the items
-    // table header row, and the BANK DETAILS / TAX SUMMARY headers —
-    // matches the reference screenshots. Paired with white banner text.
+    const COLOR_DARK_TEXT = [25, 30, 40];
+    const COLOR_MID_TEXT = [55, 60, 70];
     const COLOR_HEADER_BG = [19, 89, 143];
     const COLOR_HEADER_TEXT = [255, 255, 255];
 
-    doc.setDrawColor(...COLOR_BORDER);
-    doc.setLineWidth(0.35);
-    doc.rect(
-      margin,
-      margin,
-      contentWidth,
-      pageHeight - margin * 2
-    );
+    // ---------- Items ke hisaab se auto-compact ----------
+    const itemCount = cart.length;
+    const compact = itemCount > 3;
+    const veryCompact = itemCount > 5;
+    const rowPad = veryCompact ? 1.7 : compact ? 2.3 : 3;
+    const tblFont = veryCompact ? 8 : 8.5;
+    const buyerLineStep = veryCompact ? 3.9 : 4.3;
+    const buyerGap = veryCompact ? 0.6 : 1.2;
 
+    const drawPageBorder = () => {
+      doc.setDrawColor(...COLOR_BORDER);
+      doc.setLineWidth(0.35);
+      doc.rect(margin, margin, contentWidth, pageHeight - margin * 2);
+    };
+
+    drawPageBorder();
+
+    // ---------- TOP BANNER ----------
     const headerBannerHeight = 11;
     doc.setFillColor(...COLOR_ICE_BLUE);
     doc.rect(margin, margin, contentWidth, headerBannerHeight, "F");
 
     doc.setDrawColor(...COLOR_BORDER);
     doc.setLineWidth(0.3);
-    doc.line(
-      margin + contentWidth * 0.65,
-      margin,
-      margin + contentWidth * 0.65,
-      margin + headerBannerHeight
-    );
+    doc.line(margin + contentWidth * 0.65, margin, margin + contentWidth * 0.65, margin + headerBannerHeight);
 
     doc.setDrawColor(...COLOR_ORANGE);
     doc.setLineWidth(0.7);
-    doc.line(
-      margin,
-      margin + headerBannerHeight,
-      margin + contentWidth,
-      margin + headerBannerHeight
-    );
+    doc.line(margin, margin + headerBannerHeight, margin + contentWidth, margin + headerBannerHeight);
 
-    doc.setFont("helvetica", "bold");
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(12);
     doc.setTextColor(...COLOR_NAVY_TEXT);
     doc.text(COMPANY.name, margin + 4, margin + 7.5);
 
-    doc.setFont("helvetica", "bold");
     doc.setFontSize(11);
     doc.text("TAX INVOICE", margin + contentWidth * 0.68, margin + 7.5);
 
-    doc.setFont("helvetica", "normal");
+    // ---------- SELLER (LEFT) ----------
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(8.5);
-    doc.setTextColor(80, 80, 80);
+    doc.setTextColor(...COLOR_MID_TEXT);
     doc.text(COMPANY.addressLine1, margin + 4, 27);
     doc.text(COMPANY.addressLine2, margin + 4, 32);
     doc.text(`GSTIN: ${COMPANY.gstin}`, margin + 4, 37);
     doc.text(`State: ${COMPANY.state}`, margin + 4, 42);
-    doc.text(
-      `Mobile: ${COMPANY.mobile}   Email: ${COMPANY.email}`,
-      margin + 4,
-      47
-    );
+    doc.text(`Mobile: ${COMPANY.mobile}   Email: ${COMPANY.email}`, margin + 4, 47);
 
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8.5);
-    doc.setTextColor(60, 60, 60);
-    doc.text(
-      `Invoice No.: ${invoiceNumber}`,
-      pageWidth - margin - 4,
-      27,
-      { align: "right" }
-    );
-    doc.text(
-      `Invoice Date: ${new Date().toLocaleDateString("en-IN")}`,
-      pageWidth - margin - 4,
-      32,
-      { align: "right" }
-    );
-    doc.text(
-      `Place of Supply: ${COMPANY.placeOfSupply}`,
-      pageWidth - margin - 4,
-      37,
-      { align: "right" }
-    );
-    doc.text(
-      "Reverse Charge: No",
-      pageWidth - margin - 4,
-      42,
-      { align: "right" }
-    );
-    doc.text(
-      `Payment: ${paymentMethod.toUpperCase()}`,
-      pageWidth - margin - 4,
-      47,
-      { align: "right" }
-    );
+    // ---------- INVOICE META (RIGHT) ----------
+    doc.setTextColor(...COLOR_DARK_TEXT);
+    const rightX = pageWidth - margin - 4;
+    doc.text(`Invoice No: ${invoiceNumber}`, rightX, 27, { align: "right" });
+    doc.text(`Invoice Date: ${new Date().toLocaleDateString("en-GB")}`, rightX, 32, { align: "right" });
+    doc.text(`Place of Supply: ${COMPANY.placeOfSupply}`, rightX, 37, { align: "right" });
+    doc.text("Reverse Charge: No", rightX, 42, { align: "right" });
+    doc.text(`Payment: ${paymentMethod.toUpperCase()}`, rightX, 47, { align: "right" });
 
     doc.setDrawColor(...COLOR_BORDER);
     doc.setLineWidth(0.3);
     doc.line(margin, 51, pageWidth - margin, 51);
 
+    // ---------- BUYER (BILL TO) ----------
     const buyerHeaderY = 53;
     const buyerHeaderHeight = 6.5;
 
     doc.setFillColor(...COLOR_HEADER_BG);
     doc.rect(margin, buyerHeaderY, contentWidth, buyerHeaderHeight, "F");
 
-    doc.setFont("helvetica", "bold");
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(8.5);
     doc.setTextColor(...COLOR_HEADER_TEXT);
     doc.text("BUYER (BILL TO)", margin + 4, buyerHeaderY + 4.6);
 
-    const buyerMaxWidth = contentWidth - 8;
-    let buyerY = buyerHeaderY + buyerHeaderHeight + 4;
+    const buyerRows = [
+      ["Name", toTitleCase(selectedCustomer.name) || "Walk-in Customer"],
+      ["Address", toTitleCase(selectedCustomer.address)],
+      ["Phone", String(selectedCustomer.phone || "").trim()],
+      ["Email", String(selectedCustomer.email || "").trim()],
+      ["GSTIN", String(selectedCustomer.gstin || "").trim().toUpperCase()],
+    ].filter(([, value]) => value);
 
-    const buyerName =
-      (selectedCustomer.name || "").trim() || "Walk-in Customer";
-    const buyerAddress = (selectedCustomer.address || "").trim();
+    const labelX = margin + 4;
+    const valueX = margin + 26;
+    const valueMaxWidth = contentWidth - 30;
+    let buyerY = buyerHeaderY + buyerHeaderHeight + 4.5;
 
-    const nameLocationLine = buyerAddress
-      ? `${buyerName}, ${buyerAddress}`
-      : buyerName;
+    buyerRows.forEach(([label, value], idx) => {
+      const isName = idx === 0;
 
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(8.5);
-    doc.setTextColor(30, 30, 30);
-    const nameLocationLines = doc.splitTextToSize(
-      nameLocationLine,
-      buyerMaxWidth
-    );
-    doc.text(nameLocationLines, margin + 4, buyerY);
-    buyerY += nameLocationLines.length * 4 + 1;
+      doc.setFont(PDF_FONT, "bold");
+      doc.setFontSize(8);
+      doc.setTextColor(...COLOR_MID_TEXT);
+      doc.text(`${label}`, labelX, buyerY);
+      doc.text(":", valueX - 3, buyerY);
 
-    // GSTIN value extraction — khaali hone par line mein add hi nahi hoga
-    const rawGstin =
-      selectedCustomer.gstin ||
-      selectedCustomer.gst ||
-      selectedCustomer.gstNo ||
-      selectedCustomer.gstNumber ||
-      "";
-    const customerGstin = String(rawGstin).trim().toUpperCase();
+      doc.setFont(PDF_FONT, "bold");
+      doc.setFontSize(isName ? 9.5 : 8.5);
+      doc.setTextColor(...COLOR_DARK_TEXT);
+      const lines = doc.splitTextToSize(value, valueMaxWidth);
+      doc.text(lines, valueX, buyerY);
 
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(8);
-    doc.setTextColor(70, 70, 70);
-
-    const contactLineParts = [
-      `Phone: ${(selectedCustomer.phone || "").trim() || "-"}`,
-      `Email: ${(selectedCustomer.email || "").trim() || "-"}`,
-    ];
-
-    if (customerGstin) {
-      contactLineParts.push(`GSTIN: ${customerGstin}`);
-    }
-
-    doc.text(contactLineParts.join("   "), margin + 4, buyerY);
-    buyerY += 4.5;
-
-    const itemsTableStartY = Math.max(76, buyerY + 2);
-
-    // 👇 SKU/HSN ab reliably show hoga (fallback fix ki wajah se)
-    const tableRows = cart.map((item, index) => {
-      const amount = item.price * item.qty;
-      return [
-        index + 1,
-        item.name,
-        item.hsn && item.hsn !== "-" ? item.hsn : (item.sku || "-"),
-        item.qty,
-        `Rs. ${item.price.toFixed(2)}`,
-        `Rs. ${amount.toFixed(2)}`,
-      ];
+      buyerY += lines.length * buyerLineStep + buyerGap;
     });
+
+    const buyerBottom = buyerY - 1;
+    doc.setDrawColor(...COLOR_BORDER);
+    doc.setLineWidth(0.3);
+    doc.rect(margin, buyerHeaderY, contentWidth, buyerBottom - buyerHeaderY, "S");
+
+    const itemsTableStartY = buyerBottom + 4;
+
+    // ---------- ITEMS TABLE ----------
+    const tableRows = cart.map((item, index) => [
+      index + 1,
+      item.name,
+      item.hsn || item.sku || "-",
+      item.qty,
+      money(item.price),
+      money(item.price * item.qty),
+    ]);
 
     autoTable(doc, {
       startY: itemsTableStartY,
@@ -639,128 +865,104 @@ export default function BillingPage() {
       body: tableRows,
       theme: "grid",
       styles: {
-        font: "helvetica",
-        fontSize: 8.5,
-        cellPadding: 3,
+        font: PDF_FONT,
+        fontSize: tblFont,
+        cellPadding: rowPad,
         lineColor: COLOR_BORDER,
         lineWidth: 0.25,
         textColor: COLOR_DARK_TEXT,
-        fontStyle: "bold", // 👈 premium look — sab cells bold
+        fontStyle: "bold",
+        valign: "middle",
       },
       headStyles: {
         fillColor: COLOR_HEADER_BG,
         textColor: COLOR_HEADER_TEXT,
         fontStyle: "bold",
-        fontSize: 8.7,
+        fontSize: tblFont + 0.2,
         halign: "center",
       },
-      alternateRowStyles: {
-        fillColor: [249, 251, 253], // 👈 halka alternate row shading
-      },
+      alternateRowStyles: { fillColor: [249, 251, 253] },
       columnStyles: {
-        0: { halign: "center", cellWidth: 14, fontStyle: "normal", textColor: [110, 110, 110] },
+        0: { halign: "center", cellWidth: 14, fontStyle: "bold", textColor: COLOR_MID_TEXT },
         1: { cellWidth: 78, fontStyle: "bold", textColor: COLOR_DARK_TEXT },
         2: { halign: "center", cellWidth: 24, fontStyle: "bold", textColor: COLOR_NAVY_TEXT },
         3: { halign: "center", cellWidth: 18, fontStyle: "bold", textColor: [37, 99, 235] },
-        4: { halign: "right", cellWidth: 28, fontStyle: "normal", textColor: [80, 80, 80] },
+        4: { halign: "right", cellWidth: 28, fontStyle: "bold", textColor: COLOR_MID_TEXT },
         5: { halign: "right", cellWidth: 28, fontStyle: "bold", textColor: COLOR_DARK_TEXT },
       },
+      didDrawPage: () => drawPageBorder(),
     });
 
-    const summaryWidth = 85;
-    const summaryStartX = pageWidth - margin - summaryWidth;
-    const summaryStartY = doc.lastAutoTable.finalY + 4;
+    // ---------- FOOTER SIZE (pehle calculate, taaki bottom me fix ho sake) ----------
+    const thankYouHeight = 8;
+    const footerLeftWidth = contentWidth * 0.7;
+    const footerTextWidth = footerLeftWidth - 8;
+    const footerLineH = 3.3;
 
-    autoTable(doc, {
-      startY: summaryStartY,
-      margin: { left: summaryStartX, right: margin },
-      tableWidth: summaryWidth,
-      body: [
-        ["Taxable Value", `Rs. ${subtotal.toFixed(2)}`],
-        [`CGST @ ${halfTaxRate.toFixed(1)}%`, `Rs. ${cgstTotal.toFixed(2)}`],
-        [`SGST @ ${halfTaxRate.toFixed(1)}%`, `Rs. ${sgstTotal.toFixed(2)}`],
-        ["TOTAL PAYABLE", `Rs. ${grandTotal.toFixed(2)}`],
-      ],
-      theme: "grid",
-      styles: {
-        font: "helvetica",
-        fontSize: 8.5,
-        cellPadding: 2.7,
-        lineColor: COLOR_BORDER,
-        lineWidth: 0.2,
-        fontStyle: "bold",
-      },
-      columnStyles: {
-        0: { cellWidth: 45, textColor: [70, 70, 70], fontStyle: "bold" },
-        1: {
-          cellWidth: 40,
-          halign: "right",
-          fontStyle: "bold",
-          textColor: COLOR_DARK_TEXT,
-        },
-      },
-      didParseCell: function (data) {
-        if (data.row.index === 3) {
-          data.cell.styles.fillColor = COLOR_ORANGE;
-          data.cell.styles.textColor = [255, 255, 255];
-          data.cell.styles.fontStyle = "bold";
-          data.cell.styles.fontSize = 9.2;
-        }
-      },
-    });
+    // NOTE: font pehle set karo, tabhi wrapping sahi measure hoti hai
+    doc.setFont(PDF_FONT, "bold");
+    doc.setFontSize(7);
+    const declarationLines = doc.splitTextToSize(DECLARATION_TEXT, footerTextWidth);
 
-    let cursorY = doc.lastAutoTable.finalY + 5;
+    doc.setFontSize(6.8);
+    const termsLines = TERMS.flatMap((t, i) =>
+      doc.splitTextToSize(`${i + 1}. ${t}`, footerTextWidth)
+    );
 
+    const footerHeight =
+      5 + 4 + declarationLines.length * footerLineH + 3 + 4 + termsLines.length * footerLineH + 4;
+    const footerTop = pageHeight - margin - thankYouHeight - footerHeight;
+
+    let cursorY = doc.lastAutoTable.finalY + 4;
+
+    // Totals + words + bank + tax summary ke liye ~78mm chahiye
+    const bodyBlockHeight = 78;
+    if (cursorY + bodyBlockHeight > footerTop - 2) {
+      doc.addPage();
+      drawPageBorder();
+      cursorY = margin + 6;
+    }
+
+    // ---------- AMOUNT IN WORDS ----------
     doc.setFillColor(...COLOR_ICE_BLUE);
     doc.setDrawColor(...COLOR_BORDER);
     doc.setLineWidth(0.3);
     doc.rect(margin, cursorY, contentWidth, 12, "FD");
 
-    doc.setFont("helvetica", "bold");
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(8);
-    doc.setTextColor(70, 70, 70);
+    doc.setTextColor(...COLOR_MID_TEXT);
     doc.text("Amount Chargeable (in words):", margin + 3.5, cursorY + 4.5);
 
-    doc.setFont("helvetica", "bold");
     doc.setTextColor(...COLOR_DARK_TEXT);
-    doc.text(
-      `INR ${numberToWords(grandTotal)}`,
-      margin + 3.5,
-      cursorY + 9
-    );
+    doc.text(`INR ${numberToWords(grandTotal)}`, margin + 3.5, cursorY + 9);
 
-    cursorY += 16;
+    cursorY += 15;
 
+    // ---------- BANK DETAILS (left) | TOTALS (right) ----------
+    const summaryWidth = 85;
     const columnGap = 5;
-    const splitColWidth = (contentWidth - columnGap) / 2;
-    const leftColX = margin;
-    const rightColX = leftColX + splitColWidth + columnGap;
+    const bankWidth = contentWidth - summaryWidth - columnGap;
+    const summaryStartX = pageWidth - margin - summaryWidth;
     const subBannerHeight = 6.5;
+    const bankBoxHeight = 34;
 
+    // Bank box
     doc.setFillColor(...COLOR_HEADER_BG);
-    doc.rect(leftColX, cursorY, splitColWidth, subBannerHeight, "F");
+    doc.rect(margin, cursorY, bankWidth, subBannerHeight, "F");
     doc.setDrawColor(...COLOR_BORDER);
-    doc.rect(leftColX, cursorY, splitColWidth, subBannerHeight, "S");
+    doc.setLineWidth(0.3);
+    doc.rect(margin, cursorY, bankWidth, bankBoxHeight, "S");
 
-    doc.setFont("helvetica", "bold");
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(8);
     doc.setTextColor(...COLOR_HEADER_TEXT);
-    doc.text("BANK DETAILS", leftColX + 3, cursorY + 4.5);
+    doc.text("BANK DETAILS", margin + 3, cursorY + 4.5);
 
-    doc.setFillColor(...COLOR_HEADER_BG);
-    doc.rect(rightColX, cursorY, splitColWidth, subBannerHeight, "F");
-    doc.rect(rightColX, cursorY, splitColWidth, subBannerHeight, "S");
-
-    doc.setFont("helvetica", "bold");
-    doc.setFontSize(8);
-    doc.setTextColor(...COLOR_HEADER_TEXT);
-    doc.text("TAX SUMMARY", rightColX + 3, cursorY + 4.5);
-
-    const detailStartY = cursorY + subBannerHeight + 3.5;
-
-    doc.setFont("helvetica", "bold");
+    const bankStartY = cursorY + subBannerHeight + 4.5;
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(7.5);
-    doc.setTextColor(60, 60, 60);
+    doc.setTextColor(...COLOR_MID_TEXT);
 
     const bankLines = [
       `Account Name: ${COMPANY.bank.accountName}`,
@@ -770,28 +972,67 @@ export default function BillingPage() {
       `IFSC: ${COMPANY.bank.ifsc}`,
       `SWIFT: ${COMPANY.bank.swift}`,
     ];
-
     bankLines.forEach((line, i) => {
-      doc.text(line, leftColX + 2, detailStartY + i * 4);
+      doc.text(line, margin + 3, bankStartY + i * 4);
     });
 
+    // Totals table
     autoTable(doc, {
-      startY: detailStartY - 1,
-      margin: { left: rightColX, right: margin },
-      tableWidth: splitColWidth,
-      head: [["Taxable", "CGST", "SGST", "Total Tax"]],
+      startY: cursorY,
+      margin: { left: summaryStartX, right: margin },
+      tableWidth: summaryWidth,
       body: [
-        [
-          `Rs. ${subtotal.toFixed(2)}`,
-          `Rs. ${cgstTotal.toFixed(2)}`,
-          `Rs. ${sgstTotal.toFixed(2)}`,
-          `Rs. ${taxTotal.toFixed(2)}`,
-        ],
+        ["Taxable Value", money(subtotal)],
+        [`CGST @ ${halfTaxRate.toFixed(1)}%`, money(cgstTotal)],
+        [`SGST @ ${halfTaxRate.toFixed(1)}%`, money(sgstTotal)],
+        ["TOTAL PAYABLE", money(grandTotal)],
       ],
       theme: "grid",
       styles: {
-        font: "helvetica",
-        fontSize: 7,
+        font: PDF_FONT,
+        fontSize: 8.5,
+        cellPadding: 2.4,
+        lineColor: COLOR_BORDER,
+        lineWidth: 0.2,
+        fontStyle: "bold",
+      },
+      columnStyles: {
+        0: { cellWidth: 45, textColor: COLOR_MID_TEXT, fontStyle: "bold" },
+        1: { cellWidth: 40, halign: "right", fontStyle: "bold", textColor: COLOR_DARK_TEXT },
+      },
+      didParseCell: function (data) {
+        if (data.row.index === 3) {
+          data.cell.styles.fillColor = COLOR_ORANGE;
+          data.cell.styles.textColor = [255, 255, 255];
+          data.cell.styles.fontStyle = "bold";
+          data.cell.styles.fontSize = 9.2;
+        }
+      },
+      didDrawPage: () => drawPageBorder(),
+    });
+
+    cursorY = Math.max(cursorY + bankBoxHeight, doc.lastAutoTable.finalY) + 4;
+
+    // ---------- TAX SUMMARY (full width) ----------
+    doc.setFillColor(...COLOR_HEADER_BG);
+    doc.rect(margin, cursorY, contentWidth, subBannerHeight, "F");
+    doc.setDrawColor(...COLOR_BORDER);
+    doc.rect(margin, cursorY, contentWidth, subBannerHeight, "S");
+    doc.setFont(PDF_FONT, "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(...COLOR_HEADER_TEXT);
+    doc.text("TAX SUMMARY", margin + 3, cursorY + 4.5);
+
+    autoTable(doc, {
+      startY: cursorY + subBannerHeight,
+      margin: { left: margin, right: margin },
+      tableWidth: contentWidth,
+      head: [["Taxable", "CGST", "SGST", "Total Tax"]],
+      body: [[money(subtotal), money(cgstTotal), money(sgstTotal), money(taxTotal)]],
+      theme: "grid",
+      styles: {
+        font: PDF_FONT,
+        fontSize: 7.5,
         cellPadding: 2,
         lineColor: COLOR_BORDER,
         lineWidth: 0.2,
@@ -800,84 +1041,97 @@ export default function BillingPage() {
         halign: "center",
       },
       headStyles: {
-        fillColor: COLOR_HEADER_BG,
-        textColor: COLOR_HEADER_TEXT,
+        fillColor: COLOR_ICE_BLUE,
+        textColor: COLOR_NAVY_TEXT,
         fontStyle: "bold",
       },
+      didDrawPage: () => drawPageBorder(),
     });
 
-    cursorY =
-      Math.max(
-        detailStartY + bankLines.length * 4,
-        doc.lastAutoTable.finalY
-      ) + 6;
+    // ---------- FOOTER: Declaration + Terms (left) | Signature (right) ----------
+    doc.setDrawColor(...COLOR_BORDER);
+    doc.setLineWidth(0.3);
+    doc.line(margin, footerTop, pageWidth - margin, footerTop);
+    doc.line(
+      margin + footerLeftWidth,
+      footerTop,
+      margin + footerLeftWidth,
+      footerTop + footerHeight
+    );
 
-    doc.setFont("helvetica", "bold");
+    // Declaration
+    let fy = footerTop + 5;
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(8);
     doc.setTextColor(...COLOR_NAVY_TEXT);
-    doc.text("Declaration", margin + 4, cursorY);
+    doc.text("Declaration", margin + 4, fy);
+    fy += 4;
 
-    doc.setFont("helvetica", "normal");
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(7);
-    doc.setTextColor(100, 100, 100);
-    doc.text(
-      "We declare that this invoice shows the actual price of the goods and",
-      margin + 4,
-      cursorY + 4
-    );
-    doc.text(
-      "services described and that all particulars are true and correct.",
-      margin + 4,
-      cursorY + 7.5
-    );
+    doc.setTextColor(...COLOR_MID_TEXT);
+    doc.text(declarationLines, margin + 4, fy, { lineHeightFactor: 1.35 });
+    fy += declarationLines.length * footerLineH + 3;
 
-    doc.setFont("helvetica", "bold");
+    // Terms & Conditions
+    doc.setFont(PDF_FONT, "bold");
+    doc.setFontSize(8);
+    doc.setTextColor(...COLOR_NAVY_TEXT);
+    doc.text("Terms & Conditions", margin + 4, fy);
+    fy += 4;
+
+    doc.setFont(PDF_FONT, "bold");
+    doc.setFontSize(6.8);
+    doc.setTextColor(...COLOR_MID_TEXT);
+    doc.text(termsLines, margin + 4, fy, { lineHeightFactor: 1.35 });
+
+    // Signature (right panel)
+    const sigCenterX = margin + footerLeftWidth + (contentWidth - footerLeftWidth) / 2;
+    doc.setFont(PDF_FONT, "bold");
     doc.setFontSize(8);
     doc.setTextColor(...COLOR_DARK_TEXT);
-    doc.text(
-      `For ${COMPANY.name}`,
-      pageWidth - margin - 4,
-      pageHeight - 32,
-      { align: "right" }
-    );
+    doc.text(`For ${COMPANY.name}`, sigCenterX, footerTop + 6, {
+      align: "center",
+      maxWidth: contentWidth - footerLeftWidth - 4,
+    });
 
+    const sigLineY = footerTop + footerHeight - 10;
+    doc.setDrawColor(120, 120, 120);
+    doc.setLineWidth(0.3);
+    doc.line(sigCenterX - 20, sigLineY, sigCenterX + 20, sigLineY);
+    doc.setFont(PDF_FONT, "bold");
+    doc.setFontSize(7.5);
+    doc.setTextColor(...COLOR_MID_TEXT);
+    doc.text("Authorised Signatory", sigCenterX, sigLineY + 4.5, { align: "center" });
+
+    // ---------- THANK YOU STRIP ----------
+    const thankY = pageHeight - margin - thankYouHeight;
+    doc.setFillColor(...COLOR_ICE_BLUE);
+    doc.rect(margin, thankY, contentWidth, thankYouHeight, "F");
     doc.setDrawColor(...COLOR_BORDER);
-    doc.line(
-      pageWidth - margin - 50,
-      pageHeight - 22,
-      pageWidth - margin - 4,
-      pageHeight - 22
-    );
+    doc.setLineWidth(0.3);
+    doc.line(margin, thankY, pageWidth - margin, thankY);
 
-    doc.setFont("helvetica", "bold");
-    doc.text(
-      "Authorised Signatory",
-      pageWidth - margin - 4,
-      pageHeight - 17,
-      { align: "right" }
-    );
-
-    doc.setFont("helvetica", "normal");
-    doc.setFontSize(6.8);
-    doc.setTextColor(140, 140, 140);
+    doc.setFont(PDF_FONT, "bold");
+    doc.setFontSize(7);
+    doc.setTextColor(...COLOR_NAVY_TEXT);
     doc.text(
       "Computer-generated tax invoice — Thank you for your business!",
       pageWidth / 2,
-      pageHeight - 6,
+      thankY + 5,
       { align: "center" }
     );
 
+    // ---------- OUTPUT ----------
     const isMobile =
-      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-        navigator.userAgent
-      ) || window.innerWidth < 768;
+      /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+      window.innerWidth < 768;
 
     if (isMobile) {
-      doc.save(`${invoiceNumber}.pdf`);
+      doc.save(`${toSafeFileName(invoiceNumber)}.pdf`);
     } else {
       const blob = doc.output("blob");
-      const blobUrl = URL.createObjectURL(blob);
-      window.open(blobUrl, "_blank");
+      window.open(URL.createObjectURL(blob), "_blank");
     }
   };
 
@@ -890,9 +1144,6 @@ export default function BillingPage() {
       return;
     }
 
-    // ========================================
-    // ZOD VALIDATION — API call se pehle
-    // ========================================
     const validationPayload = {
       customerDetails: {
         name: selectedCustomer.name,
@@ -901,21 +1152,14 @@ export default function BillingPage() {
         address: selectedCustomer.address,
         gstin: selectedCustomer.gstin,
       },
-      items: cart.map((item) => ({
-        productId: item.productId,
-        qty: item.qty,
-      })),
+      items: cart.map((i) => ({ productId: i.productId, qty: i.qty })),
       paymentMethod,
     };
 
     const result = checkoutSchema.safeParse(validationPayload);
 
     if (!result.success) {
-      const errors = {};
-      result.error.issues.forEach((issue) => {
-        const key = issue.path[issue.path.length - 1];
-        errors[key] = issue.message;
-      });
+      const errors = mapIssues(result.error);
       setFieldErrors(errors);
       toast.error(Object.values(errors)[0] || "Please fix the highlighted fields.");
       return;
@@ -935,28 +1179,108 @@ export default function BillingPage() {
 
       const res = await api.post("/invoices", payload);
 
-      const invoiceNumber =
-        res.data?.invoiceNumber || `INV-${Date.now()}`;
+      // Backend ka number (INV-0012 etc.) -> BR/2026-27/012 format me
+      const invoiceNumber = formatInvoiceNumber(
+        res.data?.invoiceNumber || res.data?.invoice?.invoiceNumber || ""
+      );
 
-      generateInvoicePDF(invoiceNumber);
+      if (!invoiceNumber) {
+        toast.warn("Bill save ho gaya, par invoice number backend se nahi mila.");
+      }
 
-      toast.success(`Bill generated successfully: ${invoiceNumber}`);
+      try {
+        await generateInvoicePDF(invoiceNumber || "N/A");
+      } catch (pdfError) {
+        console.error("PDF error:", pdfError);
+        toast.error("PDF nahi ban payi — public/fonts me NotoSans fonts check karo.");
+      }
+
+      toast.success(
+        invoiceNumber
+          ? `Bill generated successfully: ${invoiceNumber}`
+          : "Bill generated successfully."
+      );
 
       setCart([]);
       clearCustomer();
     } catch (error) {
-      console.error(
-        "Invoice error:",
-        error.response?.data || error.message
-      );
-
-      toast.error(
-        error.response?.data?.message || "Bill generate nahi ho paya."
-      );
+      console.error("Invoice error:", error.response?.data || error.message);
+      toast.error(error.response?.data?.message || "Bill generate nahi ho paya.");
     } finally {
       setGenerating(false);
     }
   };
+
+  // =========================================================
+  // SMALL UI PIECES
+  // =========================================================
+  const renderQty = (item) => (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className="inline-flex h-9 items-center gap-0.5 rounded-xl bg-slate-100 px-1"
+    >
+      <button
+        type="button"
+        onClick={() => updateQty(item.productId, item.qty - 1)}
+        className="flex h-7 w-7 items-center justify-center rounded-lg bg-white text-sm font-bold text-slate-700 shadow-xs transition hover:bg-slate-200 active:scale-90 cursor-pointer"
+      >
+        −
+      </button>
+      <input
+        type="number"
+        min="1"
+        value={item.qty}
+        onChange={(e) => updateQty(item.productId, e.target.value)}
+        className="w-10 bg-transparent text-center font-mono text-sm font-bold text-slate-800 outline-none"
+      />
+      <button
+        type="button"
+        onClick={() => updateQty(item.productId, item.qty + 1)}
+        className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white shadow-xs transition hover:bg-indigo-700 active:scale-90 cursor-pointer"
+      >
+        +
+      </button>
+    </div>
+  );
+
+  const renderActions = (item) => (
+    <div className="flex items-center justify-end gap-1.5">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          openEdit(item);
+        }}
+        className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs font-bold text-amber-700 transition hover:bg-amber-100 active:scale-95 cursor-pointer"
+        title="Edit item"
+      >
+        <span>✏️</span>
+        <span>Edit</span>
+      </button>
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation();
+          deleteItem(item);
+        }}
+        className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-600 transition hover:bg-rose-100 active:scale-95 cursor-pointer"
+        title="Delete item"
+      >
+        <span>🗑️</span>
+        <span>Delete</span>
+      </button>
+    </div>
+  );
+
+  const hasCustomerData =
+    selectedCustomer._id ||
+    selectedCustomer.name ||
+    selectedCustomer.phone ||
+    selectedCustomer.email ||
+    selectedCustomer.address ||
+    selectedCustomer.gstin;
+
+  const canSaveCustomer = !selectedCustomer._id && (selectedCustomer.name || selectedCustomer.phone);
 
   // =========================================================
   // LOADING STATE
@@ -981,8 +1305,8 @@ export default function BillingPage() {
     <div className="min-h-screen bg-slate-50/70 p-3 sm:p-5 lg:p-6 xl:p-8">
       <div className="mx-auto max-w-[1600px] space-y-4 sm:space-y-6">
 
-        {/* TOP HEADER BAR */}
-        <header className="flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs transition-all sm:flex-row sm:items-center sm:justify-between sm:p-6">
+        {/* TOP HEADER */}
+        <header className="flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between sm:p-6">
           <div>
             <div className="flex items-center gap-2">
               <span className="h-2 w-2 rounded-full bg-emerald-500 ring-4 ring-emerald-50" />
@@ -994,11 +1318,11 @@ export default function BillingPage() {
               Create Invoice
             </h1>
             <p className="mt-0.5 text-xs text-slate-500 sm:text-sm">
-              Generate quick invoices and professional GST tax receipts.
+              Customer, product aur bill — sab ek hi jagah.
             </p>
           </div>
 
-          <div className="flex items-center justify-between gap-4 rounded-xl border border-indigo-100 bg-indigo-50/40 px-4 py-2.5 transition-all hover:bg-indigo-50/70 sm:min-w-[220px] sm:px-5 sm:py-3">
+          <div className="flex items-center justify-between gap-4 rounded-xl border border-indigo-100 bg-indigo-50/40 px-4 py-2.5 sm:min-w-[220px] sm:px-5 sm:py-3">
             <div>
               <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-700">
                 Current Payable
@@ -1013,437 +1337,425 @@ export default function BillingPage() {
           </div>
         </header>
 
-        {/* CUSTOMER PROFILE CARD */}
-        <section className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs transition-all sm:p-6">
+        {/* STEP 1: CUSTOMER */}
+        <section className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs sm:p-6">
           <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-            <div>
-              <h2 className="text-sm font-bold text-slate-900 sm:text-base">
-                Customer Details
-              </h2>
-              <p className="text-xs text-slate-400">
-                Pick a stored client or manually enter details (including Buyer GSTIN).
-              </p>
+            <div className="flex items-center gap-3">
+              <div>
+                <h2 className="text-sm font-bold text-slate-900 sm:text-base">Customer Details</h2>
+                <p className="text-xs text-slate-400">
+                  Search for existing customers or add new ones; leave blank or mark as walk-in.
+                </p>
+              </div>
             </div>
 
-            {(selectedCustomer._id ||
-              selectedCustomer.name ||
-              selectedCustomer.phone ||
-              selectedCustomer.email ||
-              selectedCustomer.address ||
-              selectedCustomer.gstin) && (
+            <div className="flex flex-wrap items-center gap-2">
+              {canSaveCustomer && (
+                <button
+                  type="button"
+                  onClick={handleSaveCustomer}
+                  disabled={savingCustomer}
+                  className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-emerald-700 active:scale-95 disabled:opacity-50 cursor-pointer"
+                >
+                  {savingCustomer ? "Saving..." : "+ Save Customer"}
+                </button>
+              )}
+              {hasCustomerData && (
                 <button
                   type="button"
                   onClick={clearCustomer}
-                  className="rounded-lg border border-red-200 bg-red-50/60 px-3 py-1.5 text-xs font-bold text-red-600 transition-all duration-150 hover:bg-red-500 hover:text-white active:scale-95 cursor-pointer"
+                  className="rounded-lg border border-red-200 bg-red-50/60 px-3 py-1.5 text-xs font-bold text-red-600 transition hover:bg-red-500 hover:text-white active:scale-95 cursor-pointer"
                 >
-                  Clear Customer
+                  Clear
                 </button>
               )}
+            </div>
           </div>
 
-          {/* Customer Search Dropdown */}
           <div className="relative mb-4">
             <input
               value={customerSearch}
               onChange={(e) => setCustomerSearch(e.target.value)}
-              placeholder="Search customer by name, mobile number, email or GSTIN..."
+              placeholder="Search customer by name, mobile, email or GSTIN..."
               className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-2.5 text-sm font-medium text-slate-800 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-600 focus:bg-white focus:ring-4 focus:ring-indigo-600/10 sm:py-3"
             />
 
-            {customerSearch && filteredCustomers.length > 0 && (
+            {customerSearch && (
               <div className="absolute left-0 right-0 top-full z-40 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
-                {filteredCustomers.map((customer) => (
-                  <button
-                    type="button"
-                    key={customer._id}
-                    onClick={() => selectCustomer(customer)}
-                    className="flex w-full items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-left transition-colors last:border-0 hover:bg-indigo-50/80 cursor-pointer"
-                  >
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-bold text-slate-900">
-                        {customer.name}
-                      </p>
-                      <p className="mt-0.5 truncate text-xs text-slate-400">
-                        {customer.phone || "No phone"} {customer.email ? ` · ${customer.email}` : ""}
-                        {(customer.gstin || customer.gst) ? ` · GSTIN: ${customer.gstin || customer.gst}` : ""}
-                      </p>
-                    </div>
-                    <span className="shrink-0 rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700 transition group-hover:bg-indigo-600 group-hover:text-white">
-                      Apply
-                    </span>
-                  </button>
-                ))}
+                {filteredCustomers.length === 0 ? (
+                  <p className="px-4 py-3 text-xs text-slate-400">
+                    Customer nahi mila — neeche details bharke &quot;Save Customer&quot; dabao.
+                  </p>
+                ) : (
+                  filteredCustomers.map((customer) => (
+                    <button
+                      type="button"
+                      key={customer._id}
+                      onClick={() => selectCustomer(customer)}
+                      className="flex w-full items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-left transition-colors last:border-0 hover:bg-indigo-50/80 cursor-pointer"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-bold text-slate-900">{customer.name}</p>
+                        <p className="mt-0.5 truncate text-xs text-slate-400">
+                          {customer.phone || "No phone"}
+                          {customer.email ? ` · ${customer.email}` : ""}
+                          {customer.gstin || customer.gst ? ` · GSTIN: ${customer.gstin || customer.gst}` : ""}
+                        </p>
+                      </div>
+                      <span className="shrink-0 rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700">
+                        Apply
+                      </span>
+                    </button>
+                  ))
+                )}
               </div>
             )}
           </div>
 
-          {/* Editable Fields Grid (5 Columns with GSTIN Input) */}
-          <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
-            <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.name ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-              }`}>
-              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                Customer Name
-              </label>
-              <input
-                value={selectedCustomer.name}
-                onChange={(e) => updateCustomerField("name", e.target.value)}
-                placeholder="Walk-in Customer"
-                className="mt-1 w-full bg-transparent text-sm font-bold text-slate-800 outline-none placeholder:font-normal placeholder:text-slate-400"
-              />
-              {fieldErrors.name && (
-                <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.name}</p>
-              )}
-            </div>
-
-            <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.phone ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-              }`}>
-              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                Phone Number
-              </label>
-              <input
-                value={selectedCustomer.phone}
-                onChange={(e) => updateCustomerField("phone", e.target.value)}
-                placeholder="e.g. +91 98765 43210"
-                className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400 font-mono"
-              />
-              {fieldErrors.phone && (
-                <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.phone}</p>
-              )}
-            </div>
-
-            <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.email ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-              }`}>
-              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                Email Address
-              </label>
-              <input
-                value={selectedCustomer.email}
-                onChange={(e) => updateCustomerField("email", e.target.value)}
-                placeholder="name@domain.com"
-                className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400"
-              />
-              {fieldErrors.email && (
-                <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.email}</p>
-              )}
-            </div>
-
-            <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.address ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-              }`}>
-              <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                Address / City
-              </label>
-              <input
-                value={selectedCustomer.address}
-                onChange={(e) => updateCustomerField("address", e.target.value)}
-                placeholder="Street address or city..."
-                className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400"
-              />
-              {fieldErrors.address && (
-                <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.address}</p>
-              )}
-            </div>
-
-            {/* Buyer GSTIN Input Field */}
-            <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.gstin ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-              }`}>
-              <label className="text-[10px] font-bold uppercase tracking-wider text-indigo-600">
-                Buyer GSTIN
-              </label>
-              <input
-                value={selectedCustomer.gstin}
-                onChange={(e) => updateCustomerField("gstin", e.target.value.toUpperCase())}
-                placeholder="e.g. 08AAACR5055K1Z8"
-                className="mt-1 w-full bg-transparent text-sm font-bold text-indigo-700 font-mono uppercase outline-none placeholder:font-normal placeholder:text-slate-400"
-              />
-              {fieldErrors.gstin && (
-                <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.gstin}</p>
-              )}
-            </div>
+          <div className="grid sm:grid-cols-1 gap-3 lg:grid-cols-2 xl:grid-cols-5">
+            <TextInput
+              label="Enter your Customer Name."
+              value={selectedCustomer.name}
+              onChange={(e) => updateCustomerField("name", e.target.value)}
+              placeholder="Enter your Customer Name."
+              error={fieldErrors.name}
+            />
+            <TextInput
+              label="Phone Number"
+              value={selectedCustomer.phone}
+              onChange={(e) => updateCustomerField("phone", e.target.value)}
+              placeholder="Enter your Phone Number."
+              mono
+              inputMode="numeric"
+              error={fieldErrors.phone}
+            />
+            <TextInput
+              label="Email Address"
+              value={selectedCustomer.email}
+              onChange={(e) => updateCustomerField("email", e.target.value)}
+              placeholder="Enter your Email."
+              error={fieldErrors.email}
+            />
+            <TextInput
+              label="Address / City"
+              value={selectedCustomer.address}
+              onChange={(e) => updateCustomerField("address", e.target.value)}
+              placeholder="Enter address or city..."
+              error={fieldErrors.address}
+            />
+            {/* <TextInput
+              label="Buyer GSTIN"
+              value={selectedCustomer.gstin}
+              onChange={(e) => updateCustomerField("gstin", e.target.value.toUpperCase())}
+              placeholder="08AAACR5055K1Z8"
+              mono
+              uppercase
+              error={fieldErrors.gstin}
+            /> */}
           </div>
         </section>
 
-        {/* WORKSPACE DUAL-PANE LAYOUT */}
-        <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_370px] xl:grid-cols-[minmax(0,1fr)_420px] lg:gap-6">
+        {/* WORKSPACE */}
+        <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_370px] lg:gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
 
-          {/* LEFT: PRODUCTS LIST & CART TABLE */}
+          {/* LEFT */}
           <main className="min-w-0 space-y-4 sm:space-y-6">
 
-            {/* Search Filter Bar */}
-            <section className="rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-xs transition-all sm:p-4">
-              <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
-                <div className="relative flex-1">
-                  <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-                    🔍
-                  </span>
-                  <input
-                    value={search}
-                    onChange={(e) => setSearch(e.target.value)}
-                    placeholder="Search product name or SKU code..."
-                    className="w-full rounded-xl border border-slate-200 bg-slate-50/60 py-2.5 pl-10 pr-4 text-xs sm:text-sm font-medium text-slate-900 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-600 focus:bg-white focus:ring-4 focus:ring-indigo-600/10"
-                  />
-                </div>
+            {/* STEP 2: PRODUCT ADD */}
+            <section className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs sm:p-6">
+              <div className="mb-4 flex items-center gap-3 border-b border-slate-100 pb-3">
 
-                <div className="flex items-center justify-between sm:justify-center rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-bold text-slate-600 shrink-0">
-                  <span>Available Stock</span>
-                  <span className="ml-2 font-extrabold text-indigo-700">{filteredProducts.length}</span>
-                </div>
-              </div>
-            </section>
-
-            {/* Product Cards Grid */}
-            <section className="space-y-2.5">
-              <div className="flex items-center justify-between px-1">
                 <div>
-                  <h2 className="text-sm font-bold text-slate-900 sm:text-base">
-                    Catalogue
-                  </h2>
+                  <h2 className="text-sm font-bold text-slate-900 sm:text-base">Add Electronic Product</h2>
                   <p className="text-xs text-slate-400">
-                    Tap Add to add item into the invoice cart.
+                    Product add karte hi neeche bill table me apne-aap aa jayega.
                   </p>
                 </div>
               </div>
 
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-2">
-                {filteredProducts.map((product) => {
-                  const cartItem = cart.find(
-                    (item) => item.productId === product._id
-                  );
-                  const outOfStock = Number(product.stock) <= 0;
+              {/* Saved product search */}
+              <div className="relative mb-4">
+                <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm">
+                  🔍
+                </span>
+                <input
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  placeholder="Saved product search karo (naam ya SKU)..."
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50/60 py-2.5 pl-10 pr-4 text-xs font-medium text-slate-900 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-600 focus:bg-white focus:ring-4 focus:ring-indigo-600/10 sm:text-sm"
+                />
 
-                  return (
-                    <div
-                      key={product._id}
-                      className="group flex flex-col justify-between rounded-2xl border border-slate-200/80 bg-white p-4 text-left shadow-xs transition-all duration-200 hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md"
-                    >
-                      <div>
-                        <div className="mb-2 flex items-start justify-between gap-2">
-                          <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-base transition-transform group-hover:scale-105">
-                            📦
+                {search.trim() && (
+                  <div className="absolute left-0 right-0 top-full z-40 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
+                    {filteredProducts.length === 0 ? (
+                      <p className="px-4 py-3 text-xs text-slate-400">
+                        Didn&apos;t find the product? Add a new one using the form below.
+                      </p>
+                    ) : (
+                      filteredProducts.map((product) => (
+                        <button
+                          type="button"
+                          key={product._id}
+                          onClick={() => addExistingProduct(product)}
+                          className="flex w-full items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-left transition-colors last:border-0 hover:bg-indigo-50/80 cursor-pointer"
+                        >
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-bold text-slate-900">{product.name}</p>
+                            <p className="mt-0.5 truncate font-mono text-xs text-slate-400">
+                              SKU: {product.sku || "-"} · GST {product.taxRate || 0}%
+                            </p>
                           </div>
-
-                          <span
-                            className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${outOfStock
-                              ? "bg-red-50 text-red-600 border border-red-200/50"
-                              : "bg-emerald-50 text-emerald-600 border border-emerald-200/50"
-                              }`}
-                          >
-                            {outOfStock ? "Out of Stock" : `Stock: ${product.stock}`}
-                          </span>
-                        </div>
-
-                        <p className="line-clamp-1 font-bold text-slate-800 transition-colors group-hover:text-indigo-600 text-sm sm:text-base">
-                          {product.name}
-                        </p>
-
-                        <p className="mt-0.5 truncate text-xs text-slate-400 font-mono">
-                          SKU: {product.sku || "-"}
-                        </p>
-                      </div>
-
-                      <div className="mt-4 flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
-                        <div>
-                          <p className="text-base sm:text-lg font-extrabold text-indigo-600">
-                            ₹{Number(product.price || 0).toFixed(2)}
-                          </p>
-                          <p className="text-[10px] font-medium text-slate-400">
-                            GST: {product.taxRate || 0}%
-                          </p>
-                        </div>
-
-                        {cartItem ? (
-                          <div className="flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 px-1.5 shadow-sm">
-                            <button
-                              type="button"
-                              onClick={() => updateQty(product._id, cartItem.qty - 1)}
-                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-white/20 text-xs font-bold text-white transition hover:bg-white/30 active:scale-90 cursor-pointer"
-                              title="Decrease"
-                            >
-                              −
-                            </button>
-
-                            <span className="min-w-[1.25rem] text-center text-xs sm:text-sm font-extrabold text-white">
-                              {cartItem.qty}
+                          <div className="flex shrink-0 items-center gap-2">
+                            <span className="text-sm font-extrabold text-indigo-600">
+                              {money(product.price)}
                             </span>
-
-                            <button
-                              type="button"
-                              onClick={() => addToCart(product)}
-                              disabled={cartItem.qty >= Number(product.stock)}
-                              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-white/20 text-xs font-bold text-white transition hover:bg-white/30 active:scale-90 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-                              title="Increase"
-                            >
-                              +
-                            </button>
+                            <span className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-bold text-white">
+                              + Add
+                            </span>
                           </div>
-                        ) : (
-                          <button
-                            type="button"
-                            onClick={() => addToCart(product)}
-                            disabled={outOfStock}
-                            className="inline-flex h-8 sm:h-9 items-center justify-center rounded-xl bg-indigo-600 px-3.5 text-xs font-bold text-white shadow-xs transition-all hover:bg-indigo-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-                          >
-                            + Add
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                {filteredProducts.length === 0 && (
-                  <div className="col-span-full rounded-2xl border border-dashed border-slate-300 bg-white py-12 text-center">
-                    <div className="text-3xl">📦</div>
-                    <p className="mt-2 text-sm font-bold text-slate-700">
-                      No matching products
-                    </p>
-                    <p className="mt-0.5 text-xs text-slate-400">
-                      Try searching with another product term or SKU.
-                    </p>
+                        </button>
+                      ))
+                    )}
                   </div>
                 )}
               </div>
-            </section>
 
-            {/* CART TABLE VIEW */}
-            <section className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
-              <div className="flex items-center justify-between border-b border-slate-200/80 bg-slate-50/50 px-4 py-3.5 sm:px-5">
-                <div>
-                  <h2 className="text-sm sm:text-base font-bold text-slate-900">
-                    Selected Items
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Check item rates, tax deductions, and quantities.
-                  </p>
+              {/* New product form — 3 clean rows */}
+              <form onSubmit={handleAddProduct} noValidate className="space-y-4">
+                {/* Row 1: Name (full width) */}
+                <TextInput
+                  label="Product Name"
+                  value={productForm.name}
+                  onChange={(e) => handleProductFormChange("name", e.target.value)}
+                  placeholder="e.g. Voltas 1.5 Ton AC"
+                  required
+                  error={productErrors.name}
+                />
+
+                {/* Row 2: SKU, HSN, Price, GST */}
+                <div className="grid sm:grid-cols-2 gap-4 xl:grid-cols-4">
+                  {/* <TextInput
+                    label="SKU / Model"
+                    value={productForm.sku}
+                    onChange={(e) => handleProductFormChange("sku", e.target.value)}
+                    placeholder="Auto if empty"
+                    mono
+                    error={productErrors.sku}
+                  /> */}
+                  <TextInput
+                    label="SKU/HSN Code"
+                    value={productForm.hsn}
+                    onChange={(e) => handleProductFormChange("hsn", e.target.value)}
+                    placeholder="e.g. 8415"
+                    mono
+                    error={productErrors.hsn}
+                  />
+                  <TextInput
+                    label="Price (₹)"
+                    type="number"
+                    min="0"
+                    inputMode="decimal"
+                    value={productForm.price}
+                    onChange={(e) => handleProductFormChange("price", e.target.value)}
+                    placeholder="0.00"
+                    mono
+                    required
+                    error={productErrors.price}
+                  />
+                  <GstSelect
+                    value={productForm.taxRate}
+                    onChange={(e) => handleProductFormChange("taxRate", e.target.value)}
+                    error={productErrors.taxRate}
+                  />
                 </div>
 
+                {/* Row 3: Qty + Add button */}
+                <div className="flex items-end gap-3">
+                  <div className="w-28 shrink-0">
+                    <TextInput
+                      label="Qty"
+                      type="number"
+                      min="1"
+                      inputMode="numeric"
+                      value={productForm.qty}
+                      onChange={(e) => handleProductFormChange("qty", e.target.value)}
+                      mono
+                      error={productErrors.qty}
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={addingProduct}
+                    className="inline-flex h-[42px] flex-1 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white shadow-xs transition-all hover:bg-indigo-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+                  >
+                    {addingProduct ? (
+                      <>
+                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                        <span>Adding...</span>
+                      </>
+                    ) : (
+                      <span>+ Add to Bill</span>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </section>
+
+            {/* STEP 3: ITEMS TABLE */}
+            <section className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
+              <div className="flex items-center justify-between gap-3 border-b border-slate-200/80 bg-slate-50/50 px-4 py-3.5 sm:px-5">
+                <div className="flex items-center gap-3">
+                  {/* <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-black text-white">
+                    3
+                  </span> */}
+                  <div>
+                    <h2 className="text-sm font-bold text-slate-900 sm:text-base">Invoice Items</h2>
+                    <p className="text-xs text-slate-400">
+                      Row click on Edit / Delete Show.
+                    </p>
+                  </div>
+                </div>
                 <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-0.5 text-xs font-bold text-indigo-700">
-                  {cart.length} in Cart
+                  {cart.length} item{cart.length !== 1 ? "s" : ""}
                 </span>
               </div>
 
-              {/* Responsive Table Wrapper */}
-              <div className="overflow-x-auto">
-                <table className="w-full min-w-[650px] border-collapse text-left text-xs sm:text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-100/70 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                      <th className="px-3 py-3 text-center">#</th>
-                      <th className="px-3 py-3">Product</th>
-                      <th className="px-3 py-3">SKU</th>
-                      <th className="px-3 py-3 text-center">Qty</th>
-                      <th className="px-3 py-3 text-right">Price</th>
-                      <th className="px-3 py-3 text-center">GST</th>
-                      <th className="px-3 py-3 text-right">Tax</th>
-                      <th className="px-3 py-3 text-right">Total</th>
-                      <th className="px-3 py-3 text-center">Del</th>
-                    </tr>
-                  </thead>
+              {cart.length === 0 ? (
+                <div className="py-14 text-center">
+                  <div className="text-3xl">🧾</div>
+                  <p className="mt-2 text-sm font-semibold text-slate-600">
+                    Abhi koi item nahi hai
+                  </p>
+                  <p className="text-xs text-slate-400">
+                    Upar se product add karo ya saved product search karo.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {/* TABLET / DESKTOP TABLE */}
+                  <div className="hidden overflow-x-auto md:block">
+                    <table className="w-full min-w-[560px] border-collapse text-left text-sm">
+                      <thead>
+                        <tr className="border-b border-slate-200 bg-slate-100/70 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          <th className="w-10 px-3 py-3 text-center">#</th>
+                          <th className="px-3 py-3">Product</th>
+                          <th className="px-3 py-3 text-center">Qty</th>
+                          <th className="px-3 py-3 text-right">Total</th>
+                          <th className="px-3 py-3 text-right">Action</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-medium">
+                        {cart.map((item, index) => {
+                          const taxable = item.price * item.qty;
+                          const tax = (taxable * item.taxRate) / 100;
+                          return (
+                            <tr
+                              key={item.productId}
+                              onClick={() => openEdit(item)}
+                              className="cursor-pointer transition-colors hover:bg-indigo-50/50"
+                              title="Click to edit"
+                            >
+                              <td className="px-3 py-3 text-center font-mono text-xs text-slate-400">
+                                {index + 1}
+                              </td>
+                              <td className="max-w-[220px] px-3 py-3">
+                                <p className="truncate font-bold text-slate-800">{item.name}</p>
+                                <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
+                                  {money(item.price)}
+                                  <span className="mx-1 text-slate-300">|</span>
+                                  <span className="text-amber-600">GST {item.taxRate}%</span>
+                                </p>
+                                <p className="truncate font-mono text-[10px] text-slate-400">
+                                  {item.hsn ? `HSN: ${item.hsn} · ` : ""}SKU: {item.sku}
+                                </p>
+                              </td>
+                              <td className="px-3 py-3 text-center">{renderQty(item)}</td>
+                              <td className="whitespace-nowrap px-3 py-3 text-right">
+                                <p className="font-black text-slate-900">{money(taxable + tax)}</p>
+                                <p className="text-[10px] text-slate-400">incl. tax {money(tax)}</p>
+                              </td>
+                              <td className="px-3 py-3">{renderActions(item)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      <tfoot>
+                        <tr className="border-t-2 border-slate-200 bg-slate-50">
+                          <td colSpan={3} className="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-slate-500">
+                            Grand Total ({totalItems} Pcs)
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-3 text-right text-base font-black text-indigo-700">
+                            {money(grandTotal)}
+                          </td>
+                          <td />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
 
-                  <tbody className="divide-y divide-slate-100 font-medium">
-                    {cart.length === 0 ? (
-                      <tr>
-                        <td colSpan="9" className="py-12 text-center text-slate-400">
-                          <div className="text-3xl">🧾</div>
-                          <p className="mt-2 text-sm font-semibold text-slate-600">
-                            No items in current invoice
-                          </p>
-                          <p className="text-xs text-slate-400">
-                            Click on Catalogue &apos;+ Add&apos; button above.
-                          </p>
-                        </td>
-                      </tr>
-                    ) : (
-                      cart.map((item, index) => {
-                        const taxable = item.price * item.qty;
-                        const tax = (taxable * item.taxRate) / 100;
-                        const total = taxable + tax;
+                  {/* MOBILE CARDS */}
+                  <div className="space-y-3 p-3 md:hidden">
+                    {cart.map((item, index) => {
+                      const taxable = item.price * item.qty;
+                      const tax = (taxable * item.taxRate) / 100;
+                      return (
+                        <div
+                          key={item.productId}
+                          onClick={() => openEdit(item)}
+                          className="cursor-pointer rounded-xl border border-slate-200 bg-white p-3 shadow-xs transition active:bg-indigo-50/50"
+                        >
+                          <div className="min-w-0">
+                            <p className="text-[10px] font-bold text-slate-400">#{index + 1}</p>
+                            <p className="truncate text-sm font-bold text-slate-900">{item.name}</p>
+                            <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
+                              {money(item.price)} <span className="text-slate-300">|</span>{" "}
+                              <span className="text-amber-600">GST {item.taxRate}%</span>
+                            </p>
+                            <p className="truncate font-mono text-[10px] text-slate-400">
+                              {item.hsn ? `HSN: ${item.hsn} · ` : ""}SKU: {item.sku}
+                            </p>
+                          </div>
 
-                        return (
-                          <tr
-                            key={item.productId}
-                            className="transition-colors hover:bg-slate-50/80"
-                          >
-                            <td className="px-3 py-3 text-center text-slate-400 font-mono text-xs">
-                              {index + 1}
-                            </td>
+                          <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
+                            {renderQty(item)}
+                            <div className="text-right">
+                              <p className="text-base font-black text-slate-900">{money(taxable + tax)}</p>
+                              <p className="text-[10px] text-slate-400">incl. tax {money(tax)}</p>
+                            </div>
+                          </div>
 
-                            <td className="max-w-[200px] truncate px-3 py-3 font-bold text-slate-800">
-                              {item.name}
-                            </td>
+                          <div className="mt-3 border-t border-slate-100 pt-3">{renderActions(item)}</div>
+                        </div>
+                      );
+                    })}
 
-                            <td className="px-3 py-3 text-xs text-slate-400 font-mono">
-                              {item.sku}
-                            </td>
-
-                            <td className="px-3 py-3 text-center">
-                              <input
-                                type="number"
-                                min="1"
-                                max={item.stock}
-                                value={item.qty}
-                                onChange={(e) => updateQty(item.productId, e.target.value)}
-                                className="w-14 rounded-lg border border-slate-200 bg-slate-50 py-1 text-center font-bold text-slate-800 outline-none focus:border-indigo-600 focus:bg-white focus:ring-2 focus:ring-indigo-100 font-mono"
-                              />
-                            </td>
-
-                            <td className="px-3 py-3 text-right text-slate-700">
-                              ₹{item.price.toFixed(2)}
-                            </td>
-
-                            <td className="px-3 py-3 text-center">
-                              <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700">
-                                {item.taxRate}%
-                              </span>
-                            </td>
-
-                            <td className="px-3 py-3 text-right text-slate-600 font-medium">
-                              ₹{tax.toFixed(2)}
-                            </td>
-
-                            <td className="px-3 py-3 text-right font-black text-slate-900">
-                              ₹{total.toFixed(2)}
-                            </td>
-
-                            <td className="px-3 py-3 text-center">
-                              <button
-                                type="button"
-                                onClick={() => removeItem(item.productId)}
-                                className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 cursor-pointer"
-                                title="Remove item"
-                              >
-                                ✕
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })
-                    )}
-                  </tbody>
-                </table>
-              </div>
+                    <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
+                      <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                        Grand Total ({totalItems} Pcs)
+                      </span>
+                      <span className="text-base font-black text-indigo-700">{money(grandTotal)}</span>
+                    </div>
+                  </div>
+                </>
+              )}
             </section>
           </main>
 
-          {/* RIGHT: BILL SUMMARY & CHECKOUT */}
+          {/* RIGHT: SUMMARY */}
           <aside className="w-full lg:sticky lg:top-6 lg:self-start">
             <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
-
               <div className="flex items-center justify-between border-b border-slate-200/80 px-5 py-4">
                 <div>
-                  <h2 className="text-base font-extrabold text-slate-900">
-                    Bill Summary
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Payment details & dispatch breakdown.
-                  </p>
+                  <h2 className="text-base font-extrabold text-slate-900">Bill Summary</h2>
+                  <p className="text-xs text-slate-400">Payment details & breakdown.</p>
                 </div>
                 <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-base">
                   💳
                 </span>
               </div>
 
-              <div className="p-4 sm:p-5 space-y-4">
-
-                {/* Active Customer Badge */}
+              <div className="space-y-4 p-4 sm:p-5">
                 <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3">
                   <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                     Billed To
@@ -1452,36 +1764,38 @@ export default function BillingPage() {
                     {selectedCustomer.name || "Walk-in Customer"}
                   </p>
                   {selectedCustomer.phone && (
-                    <p className="mt-0.5 text-xs text-slate-500 font-mono">
+                    <p className="mt-0.5 font-mono text-xs text-slate-500">
                       Phone: {selectedCustomer.phone}
                     </p>
                   )}
                   {selectedCustomer.gstin && (
-                    <p className="mt-0.5 text-xs font-bold text-indigo-700 font-mono uppercase">
+                    <p className="mt-0.5 font-mono text-xs font-bold uppercase text-indigo-700">
                       GSTIN: {selectedCustomer.gstin}
                     </p>
                   )}
                 </div>
 
-                {/* Amount Computations */}
                 <div className="space-y-2.5 text-xs sm:text-sm">
-                  <div className="flex items-center justify-between text-slate-500 font-medium">
+                  <div className="flex items-center justify-between font-medium text-slate-500">
                     <span>Total Quantity</span>
                     <span className="font-bold text-slate-800">{totalItems} Pcs</span>
                   </div>
-                  <div className="flex items-center justify-between text-slate-500 font-medium">
+                  <div className="flex items-center justify-between font-medium text-slate-500">
                     <span>Taxable Base</span>
-                    <span className="font-semibold text-slate-800">₹{subtotal.toFixed(2)}</span>
+                    <span className="font-semibold text-slate-800">{money(subtotal)}</span>
                   </div>
-                  <div className="flex items-center justify-between text-slate-500 font-medium">
-                    <span>GST (CGST + SGST)</span>
-                    <span className="font-semibold text-amber-600">₹{taxTotal.toFixed(2)}</span>
+                  <div className="flex items-center justify-between font-medium text-slate-500">
+                    <span>CGST</span>
+                    <span className="font-semibold text-amber-600">{money(cgstTotal)}</span>
+                  </div>
+                  <div className="flex items-center justify-between font-medium text-slate-500">
+                    <span>SGST</span>
+                    <span className="font-semibold text-amber-600">{money(sgstTotal)}</span>
                   </div>
                 </div>
 
-                {/* Grand Total Box */}
                 <div className="rounded-xl bg-[#0e1726] p-4 text-white shadow-inner">
-                  <div className="flex items-center justify-between">
+                  <div className="flex items-center justify-between gap-2">
                     <div>
                       <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
                         Total Amount Due
@@ -1490,13 +1804,12 @@ export default function BillingPage() {
                         ₹{grandTotal.toFixed(2)}
                       </p>
                     </div>
-                    <span className="rounded-full bg-emerald-500/20 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400 border border-emerald-500/30">
-                      INR Total
+                    <span className="rounded-full border border-emerald-500/30 bg-emerald-500/20 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+                      INR
                     </span>
                   </div>
                 </div>
 
-                {/* Payment Selector */}
                 <div>
                   <label className="mb-1.5 block text-xs font-bold text-slate-600">
                     Payment Channel
@@ -1513,7 +1826,7 @@ export default function BillingPage() {
                           key={method.value}
                           type="button"
                           onClick={() => setPaymentMethod(method.value)}
-                          className={`flex flex-col items-center justify-center rounded-xl border py-2.5 transition-all cursor-pointer ${active
+                          className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border py-2.5 transition-all ${active
                             ? "border-indigo-600 bg-indigo-50/80 text-indigo-700 shadow-xs"
                             : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
                             }`}
@@ -1526,12 +1839,11 @@ export default function BillingPage() {
                   </div>
                 </div>
 
-                {/* Checkout Button */}
                 <button
                   type="button"
                   onClick={checkout}
                   disabled={cart.length === 0 || generating}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-sm font-bold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+                  className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-sm font-bold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
                 >
                   {generating ? (
                     <>
@@ -1547,19 +1859,145 @@ export default function BillingPage() {
                 </button>
 
                 <p className="text-center text-[10px] text-slate-400">
-                  Mobile devices par PDF download hogi, Desktop par preview open hoga.
+                  Mobile par PDF download hogi, Desktop par preview open hoga.
                 </p>
               </div>
             </div>
           </aside>
         </div>
       </div>
+
+      {/* EDIT ITEM MODAL */}
+      {editItem && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 backdrop-blur-sm sm:p-4">
+          <div className="fixed inset-0 cursor-pointer" onClick={() => setEditItem(null)} />
+
+          <div className="relative z-10 flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-2xl sm:rounded-3xl">
+            <div className="relative bg-gradient-to-r from-slate-900 to-[#101B3D] p-5 text-white sm:p-6">
+              <button
+                type="button"
+                onClick={() => setEditItem(null)}
+                className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-xl bg-white/10 text-slate-300 transition hover:bg-white/20 hover:text-white cursor-pointer"
+                title="Close (Esc)"
+              >
+                ✕
+              </button>
+              <div className="flex items-center gap-3 pr-10">
+                <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-amber-400/30 bg-amber-500/20 text-lg">
+                  ✏️
+                </div>
+                <div className="min-w-0">
+                  <h3 className="text-base font-bold sm:text-lg">Edit Item</h3>
+                  <p className="truncate text-xs text-slate-300">
+                    Changes product me bhi save honge.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <form onSubmit={saveEdit} noValidate className="space-y-4 overflow-y-auto p-5 sm:p-6">
+              <TextInput
+                label="Product Name"
+                placeholder="Enter your Product Name."
+                value={editItem.name}
+                onChange={(e) => handleEditChange("name", e.target.value)}
+                required
+                error={editErrors.name}
+              />
+
+              <div className="grid grid-cols-2 gap-3">
+                {/* <TextInput
+                  label="SKU / Model"
+                  value={editItem.sku}
+                  onChange={(e) => handleEditChange("sku", e.target.value)}
+                  mono
+                  error={editErrors.sku}
+                /> */}
+                <TextInput
+                  label="SKU/HSN Code"
+                  placeholder="e.g. 8490"
+                  value={editItem.hsn}
+                  onChange={(e) => handleEditChange("hsn", e.target.value)}
+                  mono
+                  error={editErrors.hsn}
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-3">
+                <TextInput
+                  label="Price (₹)"
+                  type="number"
+                  placeholder="0.00"
+                  min="0"
+                  inputMode="decimal"
+                  value={editItem.price}
+                  onChange={(e) => handleEditChange("price", e.target.value)}
+                  mono
+                  required
+                  error={editErrors.price}
+                />
+                <GstSelect
+                  value={editItem.taxRate}
+                  onChange={(e) => handleEditChange("taxRate", e.target.value)}
+                  error={editErrors.taxRate}
+                />
+                <TextInput
+                  label="Qty"
+                  type="number"
+                  placeholder="1"
+                  min="1"
+                  inputMode="numeric"
+                  value={editItem.qty}
+                  onChange={(e) => handleEditChange("qty", e.target.value)}
+                  mono
+                  error={editErrors.qty}
+                />
+              </div>
+
+              <div className="flex flex-col-reverse gap-2.5 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = cart.find((i) => i.productId === editItem.productId);
+                    if (target) deleteItem(target);
+                    setEditItem(null);
+                  }}
+                  className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-bold text-red-600 transition hover:bg-red-100 cursor-pointer"
+                >
+                  Delete from Bill
+                </button>
+
+                <div className="flex gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setEditItem(null)}
+                    className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:bg-slate-100 cursor-pointer sm:flex-none"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={savingEdit}
+                    className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-xs transition hover:bg-indigo-700 active:scale-95 disabled:opacity-50 cursor-pointer sm:flex-none"
+                  >
+                    {savingEdit ? (
+                      <>
+                        <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                        <span>Saving...</span>
+                      </>
+                    ) : (
+                      <span>Save Changes</span>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
-
-
-
 
 
 // "use client";
@@ -1572,6 +2010,9 @@ export default function BillingPage() {
 // import { toast } from "react-toastify";
 // import { z } from "zod";
 
+// // =========================================================
+// // CONSTANTS
+// // =========================================================
 // const emptyCustomer = {
 //   _id: "",
 //   name: "",
@@ -1581,12 +2022,86 @@ export default function BillingPage() {
 //   gstin: "",
 // };
 
+// const emptyProductForm = {
+//   name: "",
+//   sku: "",
+//   hsn: "",
+//   price: "",
+//   taxRate: "18",
+//   qty: "1",
+// };
+
+// const GST_RATES = [0, 5, 10, 12, 18, 20, 28, 30];
+
+// // Stock UI hata diya hai, par backend ko stock field chahiye hota hai.
+// // Isliye naye product pe ye default value jayegi (UI me kahin show nahi hoti).
+// const DEFAULT_STOCK = 9999;
+
+// const TERMS = [
+//   "Goods once sold will not be taken back or exchanged.",
+//   "Warranty is as per the manufacturer's terms only. No warranty on physical damage, burning or misuse.",
+//   "Please check the goods at the time of delivery. No complaint will be entertained afterwards.",
+//   "Payment is due immediately. Interest may be charged on delayed payments.",
+//   "All disputes are subject to Jaipur jurisdiction only.",
+//   "E. & O.E. (Errors and omissions excepted).",
+// ];
+
 // // =========================================================
-// // ZOD CHECKOUT SCHEMA
+// // ZOD SCHEMAS
 // // =========================================================
 // const gstinRegex = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$/;
 // const phoneRegex = /^[6-9]\d{9}$/;
 
+// // Naya customer save karne ke liye (name + phone required)
+// const customerSchema = z.object({
+//   name: z
+//     .string({ error: "Name is required" })
+//     .trim()
+//     .min(2, "Name must be at least 2 characters")
+//     .max(100, "Name too long"),
+//   phone: z
+//     .string({ error: "Phone is required" })
+//     .trim()
+//     .regex(phoneRegex, "Enter a valid 10-digit phone number"),
+//   email: z
+//     .string()
+//     .trim()
+//     .toLowerCase()
+//     .email("Invalid email address")
+//     .optional()
+//     .or(z.literal("")),
+//   address: z.string().trim().max(250, "Address too long").optional().or(z.literal("")),
+//   gstin: z
+//     .string()
+//     .trim()
+//     .toUpperCase()
+//     .optional()
+//     .refine((val) => !val || gstinRegex.test(val), { error: "Invalid GSTIN format" }),
+// });
+
+// // Product add + edit dono ke liye
+// const productSchema = z.object({
+//   name: z
+//     .string({ error: "Product name is required" })
+//     .trim()
+//     .min(2, "Product name must be at least 2 characters")
+//     .max(120, "Product name too long"),
+//   sku: z.string().trim().max(50, "SKU too long").optional(),
+//   hsn: z.string().trim().max(20, "HSN too long").optional(),
+//   price: z.coerce
+//     .number({ error: "Price must be a number" })
+//     .positive("Price must be greater than 0"),
+//   taxRate: z.coerce
+//     .number({ error: "GST must be a number" })
+//     .min(0, "GST cannot be negative")
+//     .max(100, "GST cannot be more than 100"),
+//   qty: z.coerce
+//     .number({ error: "Quantity must be a number" })
+//     .int("Quantity must be a whole number")
+//     .min(1, "Quantity must be at least 1"),
+// });
+
+// // Checkout validation (customer optional = walk-in allowed)
 // const checkoutSchema = z.object({
 //   customerDetails: z.object({
 //     name: z.string().trim().optional(),
@@ -1617,7 +2132,10 @@ export default function BillingPage() {
 //     .array(
 //       z.object({
 //         productId: z.string({ error: "Invalid product" }).min(1),
-//         qty: z.coerce.number({ error: "Quantity must be a number" }).int().positive("Quantity must be at least 1"),
+//         qty: z.coerce
+//           .number({ error: "Quantity must be a number" })
+//           .int()
+//           .positive("Quantity must be at least 1"),
 //       })
 //     )
 //     .min(1, "Cart is empty — please add at least one product"),
@@ -1648,6 +2166,111 @@ export default function BillingPage() {
 //   },
 // };
 
+// // =========================================================
+// // HELPERS
+// // =========================================================
+// const mapIssues = (error) => {
+//   const errors = {};
+//   error.issues.forEach((issue) => {
+//     const key = issue.path[issue.path.length - 1];
+//     if (!errors[key]) errors[key] = issue.message;
+//   });
+//   return errors;
+// };
+
+// const normalizeCustomer = (c = {}) => ({
+//   _id: c._id || "",
+//   name: c.name || "",
+//   phone: c.phone || "",
+//   email: c.email || "",
+//   address: c.address || "",
+//   gstin: c.gstin || c.gst || c.gstNo || c.gstNumber || "",
+// });
+
+// const toCartItem = (product, qty = 1) => ({
+//   productId: product._id,
+//   name: product.name,
+//   sku: product.sku || "-",
+//   hsn: product.hsn || product.hsnCode || "",
+//   price: Number(product.price || 0),
+//   taxRate: Number(product.taxRate || 0),
+//   stock: Number(product.stock ?? DEFAULT_STOCK),
+//   qty: Number(qty) || 1,
+// });
+
+// const money = (n) =>
+//   `₹${Number(n || 0).toLocaleString("en-IN", {
+//     minimumFractionDigits: 2,
+//     maximumFractionDigits: 2,
+//   })}`;
+
+// const inputBase =
+//   "w-full rounded-xl border bg-slate-50/50 px-3.5 py-2.5 text-sm font-semibold text-slate-800 outline-none transition-all placeholder:font-normal placeholder:text-slate-400 hover:border-slate-300 focus:bg-white focus:ring-4";
+
+// function TextInput({
+//   label,
+//   value,
+//   onChange,
+//   error,
+//   placeholder,
+//   type = "text",
+//   mono = false,
+//   required = false,
+//   inputMode,
+//   uppercase = false,
+//   min,
+// }) {
+//   return (
+//     <div className="w-full">
+//       <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-slate-500">
+//         {label}
+//         {required && <span className="ml-1 text-red-500">*</span>}
+//       </label>
+//       <input
+//         type={type}
+//         value={value}
+//         min={min}
+//         inputMode={inputMode}
+//         onChange={onChange}
+//         placeholder={placeholder}
+//         className={`${inputBase} ${mono ? "font-mono" : ""} ${uppercase ? "uppercase" : ""} ${error
+//           ? "border-red-400 focus:border-red-500 focus:ring-red-500/10"
+//           : "border-slate-200 focus:border-indigo-600 focus:ring-indigo-600/10"
+//           }`}
+//       />
+//       {error && <p className="mt-1 text-[11px] font-semibold text-red-500">{error}</p>}
+//     </div>
+//   );
+// }
+
+// function GstSelect({ value, onChange, error }) {
+//   return (
+//     <div className="w-full">
+//       <label className="mb-1.5 block text-[11px] font-bold uppercase tracking-wider text-slate-500">
+//         GST %
+//       </label>
+//       <select
+//         value={value}
+//         onChange={onChange}
+//         className={`${inputBase} cursor-pointer ${error
+//           ? "border-red-400 focus:border-red-500 focus:ring-red-500/10"
+//           : "border-slate-200 focus:border-indigo-600 focus:ring-indigo-600/10"
+//           }`}
+//       >
+//         {GST_RATES.map((r) => (
+//           <option key={r} value={r}>
+//             {r}%
+//           </option>
+//         ))}
+//       </select>
+//       {error && <p className="mt-1 text-[11px] font-semibold text-red-500">{error}</p>}
+//     </div>
+//   );
+// }
+
+// // =========================================================
+// // MAIN COMPONENT
+// // =========================================================
 // export default function BillingPage() {
 //   const [products, setProducts] = useState([]);
 //   const [customers, setCustomers] = useState([]);
@@ -1657,8 +2280,17 @@ export default function BillingPage() {
 
 //   const [cart, setCart] = useState([]);
 //   const [selectedCustomer, setSelectedCustomer] = useState(emptyCustomer);
-//   const [fieldErrors, setFieldErrors] = useState({}); // 👈 Zod field-wise errors
+//   const [fieldErrors, setFieldErrors] = useState({});
 
+//   const [productForm, setProductForm] = useState(emptyProductForm);
+//   const [productErrors, setProductErrors] = useState({});
+//   const [addingProduct, setAddingProduct] = useState(false);
+
+//   const [editItem, setEditItem] = useState(null);
+//   const [editErrors, setEditErrors] = useState({});
+//   const [savingEdit, setSavingEdit] = useState(false);
+
+//   const [savingCustomer, setSavingCustomer] = useState(false);
 //   const [paymentMethod, setPaymentMethod] = useState("cash");
 
 //   const [loading, setLoading] = useState(true);
@@ -1674,49 +2306,27 @@ export default function BillingPage() {
 //           api.get("/products"),
 //           api.get("/customers"),
 //         ]);
-
-//         setProducts(
-//           Array.isArray(productsRes.data) ? productsRes.data : []
-//         );
-
-//         setCustomers(
-//           Array.isArray(customersRes.data) ? customersRes.data : []
-//         );
+//         setProducts(Array.isArray(productsRes.data) ? productsRes.data : []);
+//         setCustomers(Array.isArray(customersRes.data) ? customersRes.data : []);
 //       } catch (error) {
 //         toast.error(
-//           `Data loading error: ${error.response?.data?.message || error.message
-//           }`
+//           `Data loading error: ${error.response?.data?.message || error.message}`
 //         );
 //       } finally {
 //         setLoading(false);
 //       }
 //     };
-
 //     loadData();
 //   }, []);
 
-//   // =========================================================
-//   // RESTORE SELECTED CUSTOMER
-//   // =========================================================
+//   // Customers page se aaya hua customer restore
 //   useEffect(() => {
-//     const savedCustomer = sessionStorage.getItem("selectedCustomer");
-
-//     if (savedCustomer) {
+//     const saved = sessionStorage.getItem("selectedCustomer");
+//     if (saved) {
 //       try {
-//         const customer = JSON.parse(savedCustomer);
-
-//         const customerData = {
-//           _id: customer._id || "",
-//           name: customer.name || "",
-//           phone: customer.phone || "",
-//           email: customer.email || "",
-//           address: customer.address || "",
-//           gstin: customer.gstin || customer.gst || customer.gstNo || customer.gstNumber || "",
-//         };
-
+//         const customerData = normalizeCustomer(JSON.parse(saved));
 //         setSelectedCustomer(customerData);
 //         setActiveCustomer(customerData);
-
 //         sessionStorage.removeItem("selectedCustomer");
 //       } catch (error) {
 //         console.error("Selected customer error:", error);
@@ -1724,77 +2334,65 @@ export default function BillingPage() {
 //     }
 //   }, []);
 
+//   // ESC se edit popup band
+//   useEffect(() => {
+//     const onKey = (e) => {
+//       if (e.key === "Escape") setEditItem(null);
+//     };
+//     window.addEventListener("keydown", onKey);
+//     return () => window.removeEventListener("keydown", onKey);
+//   }, []);
+
 //   // =========================================================
-//   // FILTER PRODUCTS
+//   // FILTERS
 //   // =========================================================
 //   const filteredProducts = useMemo(() => {
 //     const value = search.toLowerCase().trim();
-
-//     return products.filter((product) => {
-//       return (
-//         product.name?.toLowerCase().includes(value) ||
-//         product.sku?.toLowerCase().includes(value)
-//       );
-//     });
+//     if (!value) return [];
+//     return products
+//       .filter(
+//         (p) =>
+//           p.name?.toLowerCase().includes(value) ||
+//           p.sku?.toLowerCase().includes(value)
+//       )
+//       .slice(0, 8);
 //   }, [products, search]);
 
-//   // =========================================================
-//   // FILTER CUSTOMERS
-//   // =========================================================
 //   const filteredCustomers = useMemo(() => {
 //     const value = customerSearch.toLowerCase().trim();
-
-//     if (!value) {
-//       return customers.slice(0, 8);
-//     }
-
-//     return customers.filter((customer) => {
-//       return (
-//         customer.name?.toLowerCase().includes(value) ||
-//         customer.phone?.toLowerCase().includes(value) ||
-//         customer.email?.toLowerCase().includes(value) ||
-//         customer.gstin?.toLowerCase().includes(value) ||
-//         customer.gst?.toLowerCase().includes(value)
-//       );
-//     });
+//     if (!value) return [];
+//     return customers
+//       .filter(
+//         (c) =>
+//           c.name?.toLowerCase().includes(value) ||
+//           c.phone?.toLowerCase().includes(value) ||
+//           c.email?.toLowerCase().includes(value) ||
+//           c.gstin?.toLowerCase().includes(value) ||
+//           c.gst?.toLowerCase().includes(value)
+//       )
+//       .slice(0, 8);
 //   }, [customers, customerSearch]);
 
 //   // =========================================================
-//   // SELECT CUSTOMER
+//   // CUSTOMER ACTIONS
 //   // =========================================================
 //   const selectCustomer = (customer) => {
-//     const customerData = {
-//       _id: customer._id || "",
-//       name: customer.name || "",
-//       phone: customer.phone || "",
-//       email: customer.email || "",
-//       address: customer.address || "",
-//       gstin: customer.gstin || customer.gst || customer.gstNo || customer.gstNumber || "",
-//     };
-
-//     setSelectedCustomer(customerData);
-//     setActiveCustomer(customerData);
+//     const data = normalizeCustomer(customer);
+//     setSelectedCustomer(data);
+//     setActiveCustomer(data);
 //     setCustomerSearch("");
+//     setFieldErrors({});
 //   };
 
-//   // =========================================================
-//   // MANUAL EDIT OF CUSTOMER FIELDS
-//   // =========================================================
 //   const updateCustomerField = (field, value) => {
-//     setSelectedCustomer((prev) => {
-//       const next = { ...prev, [field]: value };
-//       setActiveCustomer(next);
-//       return next;
-//     });
-
+//     const next = { ...selectedCustomer, [field]: value };
+//     setSelectedCustomer(next);
+//     setActiveCustomer(next);
 //     if (fieldErrors[field]) {
 //       setFieldErrors((prev) => ({ ...prev, [field]: undefined }));
 //     }
 //   };
 
-//   // =========================================================
-//   // CLEAR CUSTOMER
-//   // =========================================================
 //   const clearCustomer = () => {
 //     setSelectedCustomer(emptyCustomer);
 //     setActiveCustomer(null);
@@ -1802,207 +2400,261 @@ export default function BillingPage() {
 //     setFieldErrors({});
 //   };
 
-//   // =========================================================
-//   // ADD PRODUCT TO CART
-//   // =========================================================
-//   const addToCart = (product) => {
-//     if (Number(product.stock) <= 0) {
-//       toast.warn("This product is out of stock.");
+//   // Naya customer database me save karo
+//   const handleSaveCustomer = async () => {
+//     const result = customerSchema.safeParse({
+//       name: selectedCustomer.name,
+//       phone: selectedCustomer.phone,
+//       email: selectedCustomer.email,
+//       address: selectedCustomer.address,
+//       gstin: selectedCustomer.gstin,
+//     });
+
+//     if (!result.success) {
+//       const errors = mapIssues(result.error);
+//       setFieldErrors(errors);
+//       toast.error(Object.values(errors)[0] || "Please fix highlighted fields.");
 //       return;
 //     }
 
-//     setCart((prev) => {
-//       const existing = prev.find(
-//         (item) => item.productId === product._id
-//       );
+//     setFieldErrors({});
 
-//       if (existing) {
-//         if (existing.qty >= Number(product.stock)) {
-//           toast.warn("Stock limit reached for this product.");
-//           return prev;
-//         }
+//     try {
+//       setSavingCustomer(true);
+//       const res = await api.post("/customers", result.data);
+//       let created = res.data?.customer || res.data?.data || res.data;
 
-//         return prev.map((item) =>
-//           item.productId === product._id
-//             ? {
-//               ...item,
-//               qty: item.qty + 1,
-//             }
-//             : item
-//         );
+//       if (!created?._id) {
+//         const list = await api.get("/customers");
+//         const arr = Array.isArray(list.data) ? list.data : [];
+//         setCustomers(arr);
+//         created = arr.find((c) => c.phone === result.data.phone);
+//       } else {
+//         setCustomers((prev) => [created, ...prev]);
 //       }
 
-//       return [
-//         ...prev,
-//         {
-//           productId: product._id,
-//           name: product.name,
-//           sku: product.sku || "-",
-//           // 👇 FIX: sku ko bhi fallback mein add kiya, kyunki product model mein
-//           // alag se hsn/hsnCode field nahi hai — SKU hi HSN ki jagah use hoga
-//           hsn: product.hsn || product.hsnCode || product.sku || "-",
-//           price: Number(product.price || 0),
-//           taxRate: Number(product.taxRate || 0),
-//           stock: Number(product.stock || 0),
-//           qty: 1,
-//         },
-//       ];
+//       const data = normalizeCustomer({ ...result.data, ...created });
+//       setSelectedCustomer(data);
+//       setActiveCustomer(data);
+//       toast.success("Customer saved successfully.");
+//     } catch (error) {
+//       if (error.response?.data?.errors) {
+//         const backendErrors = {};
+//         error.response.data.errors.forEach((fe) => {
+//           backendErrors[fe.field] = fe.message;
+//         });
+//         setFieldErrors(backendErrors);
+//       }
+//       toast.error(error.response?.data?.message || "Customer save failed.");
+//     } finally {
+//       setSavingCustomer(false);
+//     }
+//   };
+
+//   // =========================================================
+//   // CART ACTIONS
+//   // =========================================================
+//   const addToCart = (product, qty = 1) => {
+//     setCart((prev) => {
+//       const existing = prev.find((i) => i.productId === product._id);
+//       if (existing) {
+//         return prev.map((i) =>
+//           i.productId === product._id ? { ...i, qty: i.qty + Number(qty) } : i
+//         );
+//       }
+//       return [...prev, toCartItem(product, qty)];
 //     });
 //   };
 
-//   // =========================================================
-//   // UPDATE QTY
-//   // =========================================================
+//   const addExistingProduct = (product) => {
+//     addToCart(product, 1);
+//     setSearch("");
+//     toast.success(`${product.name} added to bill`);
+//   };
+
 //   const updateQty = (productId, qty) => {
-//     const newQty = Number(qty);
-
-//     if (newQty <= 0 || Number.isNaN(newQty)) {
-//       setCart((prev) =>
-//         prev.filter((item) => item.productId !== productId)
-//       );
-//       return;
-//     }
-
+//     const n = Math.floor(Number(qty));
+//     if (Number.isNaN(n)) return;
+//     const safe = Math.min(Math.max(n, 1), 99999);
 //     setCart((prev) =>
-//       prev.map((item) =>
-//         item.productId === productId
-//           ? {
-//             ...item,
-//             qty:
-//               item.stock && newQty > item.stock
-//                 ? item.stock
-//                 : newQty,
-//           }
-//           : item
-//       )
+//       prev.map((i) => (i.productId === productId ? { ...i, qty: safe } : i))
 //     );
 //   };
 
-//   // =========================================================
-//   // REMOVE ITEM
-//   // =========================================================
 //   const removeItem = (productId) => {
-//     setCart((prev) =>
-//       prev.filter((item) => item.productId !== productId)
-//     );
+//     setCart((prev) => prev.filter((i) => i.productId !== productId));
+//   };
+
+//   const deleteItem = (item) => {
+//     removeItem(item.productId);
+//     toast.info(`${item.name} removed from bill`);
+//   };
+
+//   // =========================================================
+//   // ADD NEW PRODUCT -> DB me save + bill me auto add
+//   // =========================================================
+//   const handleProductFormChange = (field, value) => {
+//     setProductForm((prev) => ({ ...prev, [field]: value }));
+//     if (productErrors[field]) {
+//       setProductErrors((prev) => ({ ...prev, [field]: undefined }));
+//     }
+//   };
+
+//   const handleAddProduct = async (e) => {
+//     e.preventDefault();
+
+//     const result = productSchema.safeParse(productForm);
+//     if (!result.success) {
+//       const errors = mapIssues(result.error);
+//       setProductErrors(errors);
+//       toast.error(Object.values(errors)[0] || "Please fix highlighted fields.");
+//       return;
+//     }
+
+//     setProductErrors({});
+//     const { name, sku, hsn, price, taxRate, qty } = result.data;
+
+//     const payload = {
+//       name,
+//       sku: sku || `SKU-${Date.now().toString().slice(-6)}`,
+//       hsn: hsn || "",
+//       price,
+//       taxRate,
+//       stock: DEFAULT_STOCK,
+//     };
+
+//     try {
+//       setAddingProduct(true);
+//       const res = await api.post("/products", payload);
+//       let created = res.data?.product || res.data?.data || res.data;
+
+//       if (!created?._id) {
+//         const list = await api.get("/products");
+//         const arr = Array.isArray(list.data) ? list.data : [];
+//         setProducts(arr);
+//         created = arr.find((p) => p.sku === payload.sku) || arr.find((p) => p.name === name);
+//       } else {
+//         setProducts((prev) => [created, ...prev]);
+//       }
+
+//       if (!created?._id) throw new Error("Product save hua, par ID nahi mili.");
+
+//       // Product turant bill table me add
+//       addToCart({ ...payload, ...created }, qty);
+//       setProductForm(emptyProductForm);
+//       toast.success(`${name} added to bill`);
+//     } catch (error) {
+//       console.error("Product add error:", error.response?.data || error.message);
+//       toast.error(error.response?.data?.message || error.message || "Product save failed.");
+//     } finally {
+//       setAddingProduct(false);
+//     }
+//   };
+
+//   // =========================================================
+//   // EDIT ITEM
+//   // =========================================================
+//   const openEdit = (item) => {
+//     setEditItem({
+//       productId: item.productId,
+//       name: item.name,
+//       sku: item.sku === "-" ? "" : item.sku,
+//       hsn: item.hsn || "",
+//       price: String(item.price),
+//       taxRate: String(item.taxRate),
+//       qty: String(item.qty),
+//       stock: item.stock,
+//     });
+//     setEditErrors({});
+//   };
+
+//   const handleEditChange = (field, value) => {
+//     setEditItem((prev) => ({ ...prev, [field]: value }));
+//     if (editErrors[field]) {
+//       setEditErrors((prev) => ({ ...prev, [field]: undefined }));
+//     }
+//   };
+
+//   const saveEdit = async (e) => {
+//     e.preventDefault();
+
+//     const result = productSchema.safeParse(editItem);
+//     if (!result.success) {
+//       const errors = mapIssues(result.error);
+//       setEditErrors(errors);
+//       toast.error(Object.values(errors)[0] || "Please fix highlighted fields.");
+//       return;
+//     }
+
+//     const { name, sku, hsn, price, taxRate, qty } = result.data;
+//     const payload = {
+//       name,
+//       hsn: hsn || "",
+//       price,
+//       taxRate,
+//       stock: editItem.stock ?? DEFAULT_STOCK,
+//     };
+//     if (sku) payload.sku = sku;
+
+//     try {
+//       setSavingEdit(true);
+//       await api.put(`/products/${editItem.productId}`, payload);
+
+//       setProducts((prev) =>
+//         prev.map((p) => (p._id === editItem.productId ? { ...p, ...payload } : p))
+//       );
+
+//       setCart((prev) =>
+//         prev.map((i) =>
+//           i.productId === editItem.productId
+//             ? { ...i, name, sku: sku || i.sku, hsn: hsn || "", price, taxRate, qty }
+//             : i
+//         )
+//       );
+
+//       toast.success("Item updated successfully.");
+//       setEditItem(null);
+//     } catch (error) {
+//       toast.error(error.response?.data?.message || "Item update failed.");
+//     } finally {
+//       setSavingEdit(false);
+//     }
 //   };
 
 //   // =========================================================
 //   // CALCULATIONS
 //   // =========================================================
-//   const totalItems = cart.reduce(
-//     (sum, item) => sum + Number(item.qty || 0),
-//     0
-//   );
-
-//   const subtotal = cart.reduce(
-//     (sum, item) =>
-//       sum + Number(item.price || 0) * Number(item.qty || 0),
-//     0
-//   );
-
-//   const taxTotal = cart.reduce(
-//     (sum, item) =>
-//       sum +
-//       (Number(item.price || 0) *
-//         Number(item.qty || 0) *
-//         Number(item.taxRate || 0)) /
-//       100,
-//     0
-//   );
-
+//   const totalItems = cart.reduce((sum, i) => sum + Number(i.qty || 0), 0);
+//   const subtotal = cart.reduce((sum, i) => sum + i.price * i.qty, 0);
+//   const taxTotal = cart.reduce((sum, i) => sum + (i.price * i.qty * i.taxRate) / 100, 0);
 //   const grandTotal = subtotal + taxTotal;
 
 //   const cgstTotal = taxTotal / 2;
 //   const sgstTotal = taxTotal / 2;
-//   const effectiveTaxRate =
-//     subtotal > 0 ? (taxTotal / subtotal) * 100 : 0;
+//   const effectiveTaxRate = subtotal > 0 ? (taxTotal / subtotal) * 100 : 0;
 //   const halfTaxRate = effectiveTaxRate / 2;
 
 //   // =========================================================
 //   // NUMBER TO WORDS
 //   // =========================================================
 //   const numberToWords = (amount) => {
-//     const ones = [
-//       "",
-//       "One",
-//       "Two",
-//       "Three",
-//       "Four",
-//       "Five",
-//       "Six",
-//       "Seven",
-//       "Eight",
-//       "Nine",
-//       "Ten",
-//       "Eleven",
-//       "Twelve",
-//       "Thirteen",
-//       "Fourteen",
-//       "Fifteen",
-//       "Sixteen",
-//       "Seventeen",
-//       "Eighteen",
-//       "Nineteen",
-//     ];
-
-//     const tens = [
-//       "",
-//       "",
-//       "Twenty",
-//       "Thirty",
-//       "Forty",
-//       "Fifty",
-//       "Sixty",
-//       "Seventy",
-//       "Eighty",
-//       "Ninety",
-//     ];
+//     const ones = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen", "Nineteen"];
+//     const tens = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
 
 //     const convert = (num) => {
 //       if (num < 20) return ones[num];
-//       if (num < 100)
-//         return (
-//           tens[Math.floor(num / 10)] +
-//           (num % 10 ? " " + ones[num % 10] : "")
-//         );
-//       if (num < 1000)
-//         return (
-//           ones[Math.floor(num / 100)] +
-//           " Hundred" +
-//           (num % 100 ? " " + convert(num % 100) : "")
-//         );
-//       if (num < 100000)
-//         return (
-//           convert(Math.floor(num / 1000)) +
-//           " Thousand" +
-//           (num % 1000 ? " " + convert(num % 1000) : "")
-//         );
-//       if (num < 10000000)
-//         return (
-//           convert(Math.floor(num / 100000)) +
-//           " Lakh" +
-//           (num % 100000 ? " " + convert(num % 100000) : "")
-//         );
-//       return (
-//         convert(Math.floor(num / 10000000)) +
-//         " Crore" +
-//         (num % 10000000 ? " " + convert(num % 10000000) : "")
-//       );
+//       if (num < 100) return tens[Math.floor(num / 10)] + (num % 10 ? " " + ones[num % 10] : "");
+//       if (num < 1000) return ones[Math.floor(num / 100)] + " Hundred" + (num % 100 ? " " + convert(num % 100) : "");
+//       if (num < 100000) return convert(Math.floor(num / 1000)) + " Thousand" + (num % 1000 ? " " + convert(num % 1000) : "");
+//       if (num < 10000000) return convert(Math.floor(num / 100000)) + " Lakh" + (num % 100000 ? " " + convert(num % 100000) : "");
+//       return convert(Math.floor(num / 10000000)) + " Crore" + (num % 10000000 ? " " + convert(num % 10000000) : "");
 //     };
 
 //     const rupees = Math.floor(amount);
 //     const paise = Math.round((amount - rupees) * 100);
 
-//     let result =
-//       rupees === 0
-//         ? "Zero Rupees"
-//         : `${convert(rupees)} Rupees`;
-
-//     if (paise > 0) {
-//       result += ` and ${convert(paise)} Paise`;
-//     }
-
+//     let result = rupees === 0 ? "Zero Rupees" : `${convert(rupees)} Rupees`;
+//     if (paise > 0) result += ` and ${convert(paise)} Paise`;
 //     return `${result} Only`;
 //   };
 
@@ -2010,11 +2662,7 @@ export default function BillingPage() {
 //   // GENERATE PDF
 //   // =========================================================
 //   const generateInvoicePDF = (invoiceNumber) => {
-//     const doc = new jsPDF({
-//       orientation: "portrait",
-//       unit: "mm",
-//       format: "a4",
-//     });
+//     const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
 
 //     const pageWidth = doc.internal.pageSize.getWidth();
 //     const pageHeight = doc.internal.pageSize.getHeight();
@@ -2025,16 +2673,17 @@ export default function BillingPage() {
 //     const COLOR_NAVY_TEXT = [16, 76, 126];
 //     const COLOR_ORANGE = [237, 125, 32];
 //     const COLOR_BORDER = [205, 218, 228];
-//     const COLOR_DARK_TEXT = [25, 30, 40]; // 👈 premium darker text for amounts/names
+//     const COLOR_DARK_TEXT = [25, 30, 40];
+//     const COLOR_HEADER_BG = [19, 89, 143];
+//     const COLOR_HEADER_TEXT = [255, 255, 255];
 
-//     doc.setDrawColor(...COLOR_BORDER);
-//     doc.setLineWidth(0.35);
-//     doc.rect(
-//       margin,
-//       margin,
-//       contentWidth,
-//       pageHeight - margin * 2
-//     );
+//     const drawPageBorder = () => {
+//       doc.setDrawColor(...COLOR_BORDER);
+//       doc.setLineWidth(0.35);
+//       doc.rect(margin, margin, contentWidth, pageHeight - margin * 2);
+//     };
+
+//     drawPageBorder();
 
 //     const headerBannerHeight = 11;
 //     doc.setFillColor(...COLOR_ICE_BLUE);
@@ -2042,28 +2691,17 @@ export default function BillingPage() {
 
 //     doc.setDrawColor(...COLOR_BORDER);
 //     doc.setLineWidth(0.3);
-//     doc.line(
-//       margin + contentWidth * 0.65,
-//       margin,
-//       margin + contentWidth * 0.65,
-//       margin + headerBannerHeight
-//     );
+//     doc.line(margin + contentWidth * 0.65, margin, margin + contentWidth * 0.65, margin + headerBannerHeight);
 
 //     doc.setDrawColor(...COLOR_ORANGE);
 //     doc.setLineWidth(0.7);
-//     doc.line(
-//       margin,
-//       margin + headerBannerHeight,
-//       margin + contentWidth,
-//       margin + headerBannerHeight
-//     );
+//     doc.line(margin, margin + headerBannerHeight, margin + contentWidth, margin + headerBannerHeight);
 
 //     doc.setFont("helvetica", "bold");
 //     doc.setFontSize(12);
 //     doc.setTextColor(...COLOR_NAVY_TEXT);
 //     doc.text(COMPANY.name, margin + 4, margin + 7.5);
 
-//     doc.setFont("helvetica", "bold");
 //     doc.setFontSize(11);
 //     doc.text("TAX INVOICE", margin + contentWidth * 0.68, margin + 7.5);
 
@@ -2074,45 +2712,15 @@ export default function BillingPage() {
 //     doc.text(COMPANY.addressLine2, margin + 4, 32);
 //     doc.text(`GSTIN: ${COMPANY.gstin}`, margin + 4, 37);
 //     doc.text(`State: ${COMPANY.state}`, margin + 4, 42);
-//     doc.text(
-//       `Mobile: ${COMPANY.mobile}   Email: ${COMPANY.email}`,
-//       margin + 4,
-//       47
-//     );
+//     doc.text(`Mobile: ${COMPANY.mobile}   Email: ${COMPANY.email}`, margin + 4, 47);
 
-//     doc.setFont("helvetica", "normal");
-//     doc.setFontSize(8.5);
 //     doc.setTextColor(60, 60, 60);
-//     doc.text(
-//       `Invoice No.: ${invoiceNumber}`,
-//       pageWidth - margin - 4,
-//       27,
-//       { align: "right" }
-//     );
-//     doc.text(
-//       `Invoice Date: ${new Date().toLocaleDateString("en-IN")}`,
-//       pageWidth - margin - 4,
-//       32,
-//       { align: "right" }
-//     );
-//     doc.text(
-//       `Place of Supply: ${COMPANY.placeOfSupply}`,
-//       pageWidth - margin - 4,
-//       37,
-//       { align: "right" }
-//     );
-//     doc.text(
-//       "Reverse Charge: No",
-//       pageWidth - margin - 4,
-//       42,
-//       { align: "right" }
-//     );
-//     doc.text(
-//       `Payment: ${paymentMethod.toUpperCase()}`,
-//       pageWidth - margin - 4,
-//       47,
-//       { align: "right" }
-//     );
+//     const rightX = pageWidth - margin - 4;
+//     doc.text(`Invoice No.: ${invoiceNumber}`, rightX, 27, { align: "right" });
+//     doc.text(`Invoice Date: ${new Date().toLocaleDateString("en-IN")}`, rightX, 32, { align: "right" });
+//     doc.text(`Place of Supply: ${COMPANY.placeOfSupply}`, rightX, 37, { align: "right" });
+//     doc.text("Reverse Charge: No", rightX, 42, { align: "right" });
+//     doc.text(`Payment: ${paymentMethod.toUpperCase()}`, rightX, 47, { align: "right" });
 
 //     doc.setDrawColor(...COLOR_BORDER);
 //     doc.setLineWidth(0.3);
@@ -2121,74 +2729,55 @@ export default function BillingPage() {
 //     const buyerHeaderY = 53;
 //     const buyerHeaderHeight = 6.5;
 
-//     doc.setFillColor(...COLOR_ICE_BLUE);
+//     doc.setFillColor(...COLOR_HEADER_BG);
 //     doc.rect(margin, buyerHeaderY, contentWidth, buyerHeaderHeight, "F");
 
 //     doc.setFont("helvetica", "bold");
 //     doc.setFontSize(8.5);
-//     doc.setTextColor(...COLOR_NAVY_TEXT);
+//     doc.setTextColor(...COLOR_HEADER_TEXT);
 //     doc.text("BUYER (BILL TO)", margin + 4, buyerHeaderY + 4.6);
 
 //     const buyerMaxWidth = contentWidth - 8;
 //     let buyerY = buyerHeaderY + buyerHeaderHeight + 4;
 
-//     const buyerName =
-//       (selectedCustomer.name || "").trim() || "Walk-in Customer";
+//     const buyerName = (selectedCustomer.name || "").trim();
 //     const buyerAddress = (selectedCustomer.address || "").trim();
-
-//     const nameLocationLine = buyerAddress
-//       ? `${buyerName}, ${buyerAddress}`
-//       : buyerName;
+//     const nameLocationLine = buyerAddress ? `${buyerName}, ${buyerAddress}` : buyerName;
 
 //     doc.setFont("helvetica", "bold");
 //     doc.setFontSize(8.5);
 //     doc.setTextColor(30, 30, 30);
-//     const nameLocationLines = doc.splitTextToSize(
-//       nameLocationLine,
-//       buyerMaxWidth
-//     );
+//     const nameLocationLines = doc.splitTextToSize(nameLocationLine, buyerMaxWidth);
 //     doc.text(nameLocationLines, margin + 4, buyerY);
 //     buyerY += nameLocationLines.length * 4 + 1;
 
-//     // GSTIN value extraction — khaali hone par line mein add hi nahi hoga
-//     const rawGstin =
-//       selectedCustomer.gstin ||
-//       selectedCustomer.gst ||
-//       selectedCustomer.gstNo ||
-//       selectedCustomer.gstNumber ||
-//       "";
-//     const customerGstin = String(rawGstin).trim().toUpperCase();
+//     const customerGstin = String(selectedCustomer.gstin || "").trim().toUpperCase();
 
 //     doc.setFont("helvetica", "normal");
 //     doc.setFontSize(8);
 //     doc.setTextColor(70, 70, 70);
 
 //     const contactLineParts = [
+//       `Name: ${(selectedCustomer.name || "").trim() || "-"}`,
+//       `Address: ${(selectedCustomer.address || "").trim() || "-"}`,
 //       `Phone: ${(selectedCustomer.phone || "").trim() || "-"}`,
 //       `Email: ${(selectedCustomer.email || "").trim() || "-"}`,
 //     ];
-
-//     if (customerGstin) {
-//       contactLineParts.push(`GSTIN: ${customerGstin}`);
-//     }
+//     if (customerGstin) contactLineParts.push(`GSTIN: ${customerGstin}`);
 
 //     doc.text(contactLineParts.join("   "), margin + 4, buyerY);
 //     buyerY += 4.5;
 
 //     const itemsTableStartY = Math.max(76, buyerY + 2);
 
-//     // 👇 SKU/HSN ab reliably show hoga (fallback fix ki wajah se)
-//     const tableRows = cart.map((item, index) => {
-//       const amount = item.price * item.qty;
-//       return [
-//         index + 1,
-//         item.name,
-//         item.hsn && item.hsn !== "-" ? item.hsn : (item.sku || "-"),
-//         item.qty,
-//         `Rs. ${item.price.toFixed(2)}`,
-//         `Rs. ${amount.toFixed(2)}`,
-//       ];
-//     });
+//     const tableRows = cart.map((item, index) => [
+//       index + 1,
+//       item.name,
+//       item.hsn || item.sku || "-",
+//       item.qty,
+//       `Rs. ${item.price.toFixed(2)}`,
+//       `Rs. ${(item.price * item.qty).toFixed(2)}`,
+//     ]);
 
 //     autoTable(doc, {
 //       startY: itemsTableStartY,
@@ -2203,18 +2792,16 @@ export default function BillingPage() {
 //         lineColor: COLOR_BORDER,
 //         lineWidth: 0.25,
 //         textColor: COLOR_DARK_TEXT,
-//         fontStyle: "bold", // 👈 premium look — sab cells bold
+//         fontStyle: "bold",
 //       },
 //       headStyles: {
-//         fillColor: COLOR_ICE_BLUE,
-//         textColor: COLOR_NAVY_TEXT,
+//         fillColor: COLOR_HEADER_BG,
+//         textColor: COLOR_HEADER_TEXT,
 //         fontStyle: "bold",
 //         fontSize: 8.7,
 //         halign: "center",
 //       },
-//       alternateRowStyles: {
-//         fillColor: [249, 251, 253], // 👈 halka alternate row shading
-//       },
+//       alternateRowStyles: { fillColor: [249, 251, 253] },
 //       columnStyles: {
 //         0: { halign: "center", cellWidth: 14, fontStyle: "normal", textColor: [110, 110, 110] },
 //         1: { cellWidth: 78, fontStyle: "bold", textColor: COLOR_DARK_TEXT },
@@ -2250,12 +2837,7 @@ export default function BillingPage() {
 //       },
 //       columnStyles: {
 //         0: { cellWidth: 45, textColor: [70, 70, 70], fontStyle: "bold" },
-//         1: {
-//           cellWidth: 40,
-//           halign: "right",
-//           fontStyle: "bold",
-//           textColor: COLOR_DARK_TEXT,
-//         },
+//         1: { cellWidth: 40, halign: "right", fontStyle: "bold", textColor: COLOR_DARK_TEXT },
 //       },
 //       didParseCell: function (data) {
 //         if (data.row.index === 3) {
@@ -2269,6 +2851,13 @@ export default function BillingPage() {
 
 //     let cursorY = doc.lastAutoTable.finalY + 5;
 
+//     // Space kam ho to naya page
+//     if (cursorY + 75 > pageHeight - margin) {
+//       doc.addPage();
+//       drawPageBorder();
+//       cursorY = margin + 6;
+//     }
+
 //     doc.setFillColor(...COLOR_ICE_BLUE);
 //     doc.setDrawColor(...COLOR_BORDER);
 //     doc.setLineWidth(0.3);
@@ -2279,13 +2868,8 @@ export default function BillingPage() {
 //     doc.setTextColor(70, 70, 70);
 //     doc.text("Amount Chargeable (in words):", margin + 3.5, cursorY + 4.5);
 
-//     doc.setFont("helvetica", "bold");
 //     doc.setTextColor(...COLOR_DARK_TEXT);
-//     doc.text(
-//       `INR ${numberToWords(grandTotal)}`,
-//       margin + 3.5,
-//       cursorY + 9
-//     );
+//     doc.text(`INR ${numberToWords(grandTotal)}`, margin + 3.5, cursorY + 9);
 
 //     cursorY += 16;
 
@@ -2295,28 +2879,23 @@ export default function BillingPage() {
 //     const rightColX = leftColX + splitColWidth + columnGap;
 //     const subBannerHeight = 6.5;
 
-//     doc.setFillColor(...COLOR_ICE_BLUE);
+//     doc.setFillColor(...COLOR_HEADER_BG);
 //     doc.rect(leftColX, cursorY, splitColWidth, subBannerHeight, "F");
 //     doc.setDrawColor(...COLOR_BORDER);
 //     doc.rect(leftColX, cursorY, splitColWidth, subBannerHeight, "S");
 
 //     doc.setFont("helvetica", "bold");
 //     doc.setFontSize(8);
-//     doc.setTextColor(...COLOR_NAVY_TEXT);
+//     doc.setTextColor(...COLOR_HEADER_TEXT);
 //     doc.text("BANK DETAILS", leftColX + 3, cursorY + 4.5);
 
-//     doc.setFillColor(...COLOR_ICE_BLUE);
+//     doc.setFillColor(...COLOR_HEADER_BG);
 //     doc.rect(rightColX, cursorY, splitColWidth, subBannerHeight, "F");
 //     doc.rect(rightColX, cursorY, splitColWidth, subBannerHeight, "S");
-
-//     doc.setFont("helvetica", "bold");
-//     doc.setFontSize(8);
-//     doc.setTextColor(...COLOR_NAVY_TEXT);
 //     doc.text("TAX SUMMARY", rightColX + 3, cursorY + 4.5);
 
 //     const detailStartY = cursorY + subBannerHeight + 3.5;
 
-//     doc.setFont("helvetica", "bold");
 //     doc.setFontSize(7.5);
 //     doc.setTextColor(60, 60, 60);
 
@@ -2357,19 +2936,12 @@ export default function BillingPage() {
 //         fontStyle: "bold",
 //         halign: "center",
 //       },
-//       headStyles: {
-//         fillColor: COLOR_ICE_BLUE,
-//         textColor: COLOR_NAVY_TEXT,
-//         fontStyle: "bold",
-//       },
+//       headStyles: { fillColor: COLOR_HEADER_BG, textColor: COLOR_HEADER_TEXT, fontStyle: "bold" },
 //     });
 
-//     cursorY =
-//       Math.max(
-//         detailStartY + bankLines.length * 4,
-//         doc.lastAutoTable.finalY
-//       ) + 6;
+//     cursorY = Math.max(detailStartY + bankLines.length * 4, doc.lastAutoTable.finalY) + 6;
 
+//     // ---------- DECLARATION ----------
 //     doc.setFont("helvetica", "bold");
 //     doc.setFontSize(8);
 //     doc.setTextColor(...COLOR_NAVY_TEXT);
@@ -2378,42 +2950,32 @@ export default function BillingPage() {
 //     doc.setFont("helvetica", "normal");
 //     doc.setFontSize(7);
 //     doc.setTextColor(100, 100, 100);
-//     doc.text(
-//       "We declare that this invoice shows the actual price of the goods and",
-//       margin + 4,
-//       cursorY + 4
-//     );
-//     doc.text(
-//       "services described and that all particulars are true and correct.",
-//       margin + 4,
-//       cursorY + 7.5
-//     );
+//     doc.text("We declare that this invoice shows the actual price of the goods and", margin + 4, cursorY + 4);
+//     doc.text("services described and that all particulars are true and correct.", margin + 4, cursorY + 7.5);
 
+//     // ---------- TERMS & CONDITIONS ----------
+//     const termsStartY = cursorY + 13;
+//     doc.setFont("helvetica", "bold");
+//     doc.setFontSize(8);
+//     doc.setTextColor(...COLOR_NAVY_TEXT);
+//     doc.text("Terms & Conditions", margin + 4, termsStartY);
+
+//     doc.setFont("helvetica", "normal");
+//     doc.setFontSize(6.8);
+//     doc.setTextColor(90, 90, 90);
+
+//     const termsLines = TERMS.flatMap((t, i) => doc.splitTextToSize(`${i + 1}. ${t}`, 108));
+//     doc.text(termsLines, margin + 4, termsStartY + 4.5, { lineHeightFactor: 1.35 });
+
+//     // ---------- SIGNATURE ----------
 //     doc.setFont("helvetica", "bold");
 //     doc.setFontSize(8);
 //     doc.setTextColor(...COLOR_DARK_TEXT);
-//     doc.text(
-//       `For ${COMPANY.name}`,
-//       pageWidth - margin - 4,
-//       pageHeight - 32,
-//       { align: "right" }
-//     );
+//     doc.text(`For ${COMPANY.name}`, pageWidth - margin - 4, pageHeight - 32, { align: "right" });
 
 //     doc.setDrawColor(...COLOR_BORDER);
-//     doc.line(
-//       pageWidth - margin - 50,
-//       pageHeight - 22,
-//       pageWidth - margin - 4,
-//       pageHeight - 22
-//     );
-
-//     doc.setFont("helvetica", "bold");
-//     doc.text(
-//       "Authorised Signatory",
-//       pageWidth - margin - 4,
-//       pageHeight - 17,
-//       { align: "right" }
-//     );
+//     doc.line(pageWidth - margin - 50, pageHeight - 22, pageWidth - margin - 4, pageHeight - 22);
+//     doc.text("Authorised Signatory", pageWidth - margin - 4, pageHeight - 17, { align: "right" });
 
 //     doc.setFont("helvetica", "normal");
 //     doc.setFontSize(6.8);
@@ -2426,16 +2988,14 @@ export default function BillingPage() {
 //     );
 
 //     const isMobile =
-//       /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-//         navigator.userAgent
-//       ) || window.innerWidth < 768;
+//       /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+//       window.innerWidth < 768;
 
 //     if (isMobile) {
 //       doc.save(`${invoiceNumber}.pdf`);
 //     } else {
 //       const blob = doc.output("blob");
-//       const blobUrl = URL.createObjectURL(blob);
-//       window.open(blobUrl, "_blank");
+//       window.open(URL.createObjectURL(blob), "_blank");
 //     }
 //   };
 
@@ -2448,9 +3008,6 @@ export default function BillingPage() {
 //       return;
 //     }
 
-//     // ========================================
-//     // ZOD VALIDATION — API call se pehle
-//     // ========================================
 //     const validationPayload = {
 //       customerDetails: {
 //         name: selectedCustomer.name,
@@ -2459,21 +3016,14 @@ export default function BillingPage() {
 //         address: selectedCustomer.address,
 //         gstin: selectedCustomer.gstin,
 //       },
-//       items: cart.map((item) => ({
-//         productId: item.productId,
-//         qty: item.qty,
-//       })),
+//       items: cart.map((i) => ({ productId: i.productId, qty: i.qty })),
 //       paymentMethod,
 //     };
 
 //     const result = checkoutSchema.safeParse(validationPayload);
 
 //     if (!result.success) {
-//       const errors = {};
-//       result.error.issues.forEach((issue) => {
-//         const key = issue.path[issue.path.length - 1];
-//         errors[key] = issue.message;
-//       });
+//       const errors = mapIssues(result.error);
 //       setFieldErrors(errors);
 //       toast.error(Object.values(errors)[0] || "Please fix the highlighted fields.");
 //       return;
@@ -2492,29 +3042,91 @@ export default function BillingPage() {
 //       };
 
 //       const res = await api.post("/invoices", payload);
-
-//       const invoiceNumber =
-//         res.data?.invoiceNumber || `INV-${Date.now()}`;
+//       const invoiceNumber = res.data?.invoiceNumber || `INV-${Date.now()}`;
 
 //       generateInvoicePDF(invoiceNumber);
-
 //       toast.success(`Bill generated successfully: ${invoiceNumber}`);
 
 //       setCart([]);
 //       clearCustomer();
 //     } catch (error) {
-//       console.error(
-//         "Invoice error:",
-//         error.response?.data || error.message
-//       );
-
-//       toast.error(
-//         error.response?.data?.message || "Bill generate nahi ho paya."
-//       );
+//       console.error("Invoice error:", error.response?.data || error.message);
+//       toast.error(error.response?.data?.message || "Bill generate nahi ho paya.");
 //     } finally {
 //       setGenerating(false);
 //     }
 //   };
+
+//   // =========================================================
+//   // SMALL UI PIECES
+//   // =========================================================
+//   const renderQty = (item) => (
+//     <div
+//       onClick={(e) => e.stopPropagation()}
+//       className="inline-flex h-9 items-center gap-0.5 rounded-xl bg-slate-100 px-1"
+//     >
+//       <button
+//         type="button"
+//         onClick={() => updateQty(item.productId, item.qty - 1)}
+//         className="flex h-7 w-7 items-center justify-center rounded-lg bg-white text-sm font-bold text-slate-700 shadow-xs transition hover:bg-slate-200 active:scale-90 cursor-pointer"
+//       >
+//         −
+//       </button>
+//       <input
+//         type="number"
+//         min="1"
+//         value={item.qty}
+//         onChange={(e) => updateQty(item.productId, e.target.value)}
+//         className="w-10 bg-transparent text-center font-mono text-sm font-bold text-slate-800 outline-none"
+//       />
+//       <button
+//         type="button"
+//         onClick={() => updateQty(item.productId, item.qty + 1)}
+//         className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-600 text-sm font-bold text-white shadow-xs transition hover:bg-indigo-700 active:scale-90 cursor-pointer"
+//       >
+//         +
+//       </button>
+//     </div>
+//   );
+
+//   const renderActions = (item) => (
+//     <div className="flex items-center justify-end gap-1.5">
+//       <button
+//         type="button"
+//         onClick={(e) => {
+//           e.stopPropagation();
+//           openEdit(item);
+//         }}
+//         className="inline-flex items-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs font-bold text-amber-700 transition hover:bg-amber-100 active:scale-95 cursor-pointer"
+//         title="Edit item"
+//       >
+//         <span>✏️</span>
+//         <span>Edit</span>
+//       </button>
+//       <button
+//         type="button"
+//         onClick={(e) => {
+//           e.stopPropagation();
+//           deleteItem(item);
+//         }}
+//         className="inline-flex items-center gap-1 rounded-lg border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-xs font-bold text-rose-600 transition hover:bg-rose-100 active:scale-95 cursor-pointer"
+//         title="Delete item"
+//       >
+//         <span>🗑️</span>
+//         <span>Delete</span>
+//       </button>
+//     </div>
+//   );
+
+//   const hasCustomerData =
+//     selectedCustomer._id ||
+//     selectedCustomer.name ||
+//     selectedCustomer.phone ||
+//     selectedCustomer.email ||
+//     selectedCustomer.address ||
+//     selectedCustomer.gstin;
+
+//   const canSaveCustomer = !selectedCustomer._id && (selectedCustomer.name || selectedCustomer.phone);
 
 //   // =========================================================
 //   // LOADING STATE
@@ -2539,8 +3151,8 @@ export default function BillingPage() {
 //     <div className="min-h-screen bg-slate-50/70 p-3 sm:p-5 lg:p-6 xl:p-8">
 //       <div className="mx-auto max-w-[1600px] space-y-4 sm:space-y-6">
 
-//         {/* TOP HEADER BAR */}
-//         <header className="flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs transition-all sm:flex-row sm:items-center sm:justify-between sm:p-6">
+//         {/* TOP HEADER */}
+//         <header className="flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs sm:flex-row sm:items-center sm:justify-between sm:p-6">
 //           <div>
 //             <div className="flex items-center gap-2">
 //               <span className="h-2 w-2 rounded-full bg-emerald-500 ring-4 ring-emerald-50" />
@@ -2552,11 +3164,11 @@ export default function BillingPage() {
 //               Create Invoice
 //             </h1>
 //             <p className="mt-0.5 text-xs text-slate-500 sm:text-sm">
-//               Generate quick invoices and professional GST tax receipts.
+//               Customer, product aur bill — sab ek hi jagah.
 //             </p>
 //           </div>
 
-//           <div className="flex items-center justify-between gap-4 rounded-xl border border-indigo-100 bg-indigo-50/40 px-4 py-2.5 transition-all hover:bg-indigo-50/70 sm:min-w-[220px] sm:px-5 sm:py-3">
+//           <div className="flex items-center justify-between gap-4 rounded-xl border border-indigo-100 bg-indigo-50/40 px-4 py-2.5 sm:min-w-[220px] sm:px-5 sm:py-3">
 //             <div>
 //               <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-700">
 //                 Current Payable
@@ -2571,437 +3183,430 @@ export default function BillingPage() {
 //           </div>
 //         </header>
 
-//         {/* CUSTOMER PROFILE CARD */}
-//         <section className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs transition-all sm:p-6">
+//         {/* STEP 1: CUSTOMER */}
+//         <section className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs sm:p-6">
 //           <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-//             <div>
-//               <h2 className="text-sm font-bold text-slate-900 sm:text-base">
-//                 Customer Details
-//               </h2>
-//               <p className="text-xs text-slate-400">
-//                 Pick a stored client or manually enter details (including Buyer GSTIN).
-//               </p>
+//             <div className="flex items-center gap-3">
+//               {/* <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-black text-white">
+//                 1
+//               </span> */}
+//               <div>
+//                 <h2 className="text-sm font-bold text-slate-900 sm:text-base">Customer Details</h2>
+//                 <p className="text-xs text-slate-400">
+//                   Search for existing customers or add new ones; leave blank or mark as walk-in.
+//                 </p>
+//               </div>
 //             </div>
 
-//             {(selectedCustomer._id ||
-//               selectedCustomer.name ||
-//               selectedCustomer.phone ||
-//               selectedCustomer.email ||
-//               selectedCustomer.address ||
-//               selectedCustomer.gstin) && (
+//             <div className="flex flex-wrap items-center gap-2">
+//               {canSaveCustomer && (
+//                 <button
+//                   type="button"
+//                   onClick={handleSaveCustomer}
+//                   disabled={savingCustomer}
+//                   className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-emerald-700 active:scale-95 disabled:opacity-50 cursor-pointer"
+//                 >
+//                   {savingCustomer ? "Saving..." : "+ Save Customer"}
+//                 </button>
+//               )}
+//               {hasCustomerData && (
 //                 <button
 //                   type="button"
 //                   onClick={clearCustomer}
-//                   className="rounded-lg border border-red-200 bg-red-50/60 px-3 py-1.5 text-xs font-bold text-red-600 transition-all duration-150 hover:bg-red-500 hover:text-white active:scale-95 cursor-pointer"
+//                   className="rounded-lg border border-red-200 bg-red-50/60 px-3 py-1.5 text-xs font-bold text-red-600 transition hover:bg-red-500 hover:text-white active:scale-95 cursor-pointer"
 //                 >
-//                   Clear Customer
+//                   Clear
 //                 </button>
 //               )}
+//             </div>
 //           </div>
 
-//           {/* Customer Search Dropdown */}
 //           <div className="relative mb-4">
 //             <input
 //               value={customerSearch}
 //               onChange={(e) => setCustomerSearch(e.target.value)}
-//               placeholder="Search customer by name, mobile number, email or GSTIN..."
+//               placeholder="Search customer by name, mobile, email or GSTIN..."
 //               className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-2.5 text-sm font-medium text-slate-800 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-600 focus:bg-white focus:ring-4 focus:ring-indigo-600/10 sm:py-3"
 //             />
 
-//             {customerSearch && filteredCustomers.length > 0 && (
+//             {customerSearch && (
 //               <div className="absolute left-0 right-0 top-full z-40 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
-//                 {filteredCustomers.map((customer) => (
-//                   <button
-//                     type="button"
-//                     key={customer._id}
-//                     onClick={() => selectCustomer(customer)}
-//                     className="flex w-full items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-left transition-colors last:border-0 hover:bg-indigo-50/80 cursor-pointer"
-//                   >
-//                     <div className="min-w-0">
-//                       <p className="truncate text-sm font-bold text-slate-900">
-//                         {customer.name}
-//                       </p>
-//                       <p className="mt-0.5 truncate text-xs text-slate-400">
-//                         {customer.phone || "No phone"} {customer.email ? ` · ${customer.email}` : ""}
-//                         {(customer.gstin || customer.gst) ? ` · GSTIN: ${customer.gstin || customer.gst}` : ""}
-//                       </p>
-//                     </div>
-//                     <span className="shrink-0 rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700 transition group-hover:bg-indigo-600 group-hover:text-white">
-//                       Apply
-//                     </span>
-//                   </button>
-//                 ))}
+//                 {filteredCustomers.length === 0 ? (
+//                   <p className="px-4 py-3 text-xs text-slate-400">
+//                     Customer nahi mila — neeche details bharke &quot;Save Customer&quot; dabao.
+//                   </p>
+//                 ) : (
+//                   filteredCustomers.map((customer) => (
+//                     <button
+//                       type="button"
+//                       key={customer._id}
+//                       onClick={() => selectCustomer(customer)}
+//                       className="flex w-full items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-left transition-colors last:border-0 hover:bg-indigo-50/80 cursor-pointer"
+//                     >
+//                       <div className="min-w-0">
+//                         <p className="truncate text-sm font-bold text-slate-900">{customer.name}</p>
+//                         <p className="mt-0.5 truncate text-xs text-slate-400">
+//                           {customer.phone || "No phone"}
+//                           {customer.email ? ` · ${customer.email}` : ""}
+//                           {customer.gstin || customer.gst ? ` · GSTIN: ${customer.gstin || customer.gst}` : ""}
+//                         </p>
+//                       </div>
+//                       <span className="shrink-0 rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700">
+//                         Apply
+//                       </span>
+//                     </button>
+//                   ))
+//                 )}
 //               </div>
 //             )}
 //           </div>
 
-//           {/* Editable Fields Grid (5 Columns with GSTIN Input) */}
-//           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
-//             <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.name ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-//               }`}>
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                 Customer Name
-//               </label>
-//               <input
-//                 value={selectedCustomer.name}
-//                 onChange={(e) => updateCustomerField("name", e.target.value)}
-//                 placeholder="Walk-in Customer"
-//                 className="mt-1 w-full bg-transparent text-sm font-bold text-slate-800 outline-none placeholder:font-normal placeholder:text-slate-400"
-//               />
-//               {fieldErrors.name && (
-//                 <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.name}</p>
-//               )}
-//             </div>
-
-//             <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.phone ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-//               }`}>
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                 Phone Number
-//               </label>
-//               <input
-//                 value={selectedCustomer.phone}
-//                 onChange={(e) => updateCustomerField("phone", e.target.value)}
-//                 placeholder="e.g. +91 98765 43210"
-//                 className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400 font-mono"
-//               />
-//               {fieldErrors.phone && (
-//                 <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.phone}</p>
-//               )}
-//             </div>
-
-//             <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.email ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-//               }`}>
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                 Email Address
-//               </label>
-//               <input
-//                 value={selectedCustomer.email}
-//                 onChange={(e) => updateCustomerField("email", e.target.value)}
-//                 placeholder="name@domain.com"
-//                 className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400"
-//               />
-//               {fieldErrors.email && (
-//                 <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.email}</p>
-//               )}
-//             </div>
-
-//             <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.address ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-//               }`}>
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                 Address / City
-//               </label>
-//               <input
-//                 value={selectedCustomer.address}
-//                 onChange={(e) => updateCustomerField("address", e.target.value)}
-//                 placeholder="Street address or city..."
-//                 className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400"
-//               />
-//               {fieldErrors.address && (
-//                 <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.address}</p>
-//               )}
-//             </div>
-
-//             {/* Buyer GSTIN Input Field */}
-//             <div className={`rounded-xl border p-3 transition-colors focus-within:bg-white ${fieldErrors.gstin ? "border-red-400 bg-red-50/40" : "border-slate-200/80 bg-slate-50/70 hover:border-indigo-200 focus-within:border-indigo-600"
-//               }`}>
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-indigo-600">
-//                 Buyer GSTIN
-//               </label>
-//               <input
-//                 value={selectedCustomer.gstin}
-//                 onChange={(e) => updateCustomerField("gstin", e.target.value.toUpperCase())}
-//                 placeholder="e.g. 08AAACR5055K1Z8"
-//                 className="mt-1 w-full bg-transparent text-sm font-bold text-indigo-700 font-mono uppercase outline-none placeholder:font-normal placeholder:text-slate-400"
-//               />
-//               {fieldErrors.gstin && (
-//                 <p className="mt-1 text-[10px] font-semibold text-red-500">{fieldErrors.gstin}</p>
-//               )}
-//             </div>
+//           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">
+//             <TextInput
+//               label="Customer Name"
+//               value={selectedCustomer.name}
+//               onChange={(e) => updateCustomerField("name", e.target.value)}
+//               placeholder="Walk-in Customer"
+//               error={fieldErrors.name}
+//             />
+//             <TextInput
+//               label="Phone Number"
+//               value={selectedCustomer.phone}
+//               onChange={(e) => updateCustomerField("phone", e.target.value)}
+//               placeholder="10-digit mobile"
+//               mono
+//               inputMode="numeric"
+//               error={fieldErrors.phone}
+//             />
+//             <TextInput
+//               label="Email Address"
+//               value={selectedCustomer.email}
+//               onChange={(e) => updateCustomerField("email", e.target.value)}
+//               placeholder="name@domain.com"
+//               error={fieldErrors.email}
+//             />
+//             <TextInput
+//               label="Address / City"
+//               value={selectedCustomer.address}
+//               onChange={(e) => updateCustomerField("address", e.target.value)}
+//               placeholder="Street address or city..."
+//               error={fieldErrors.address}
+//             />
+//             <TextInput
+//               label="Buyer GSTIN"
+//               value={selectedCustomer.gstin}
+//               onChange={(e) => updateCustomerField("gstin", e.target.value.toUpperCase())}
+//               placeholder="08AAACR5055K1Z8"
+//               mono
+//               uppercase
+//               error={fieldErrors.gstin}
+//             />
 //           </div>
 //         </section>
 
-//         {/* WORKSPACE DUAL-PANE LAYOUT */}
-//         <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_370px] xl:grid-cols-[minmax(0,1fr)_420px] lg:gap-6">
+//         {/* WORKSPACE */}
+//         <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_370px] lg:gap-6 xl:grid-cols-[minmax(0,1fr)_420px]">
 
-//           {/* LEFT: PRODUCTS LIST & CART TABLE */}
+//           {/* LEFT */}
 //           <main className="min-w-0 space-y-4 sm:space-y-6">
 
-//             {/* Search Filter Bar */}
-//             <section className="rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-xs transition-all sm:p-4">
-//               <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
-//                 <div className="relative flex-1">
-//                   <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-//                     🔍
-//                   </span>
-//                   <input
-//                     value={search}
-//                     onChange={(e) => setSearch(e.target.value)}
-//                     placeholder="Search product name or SKU code..."
-//                     className="w-full rounded-xl border border-slate-200 bg-slate-50/60 py-2.5 pl-10 pr-4 text-xs sm:text-sm font-medium text-slate-900 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-600 focus:bg-white focus:ring-4 focus:ring-indigo-600/10"
-//                   />
-//                 </div>
-
-//                 <div className="flex items-center justify-between sm:justify-center rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-bold text-slate-600 shrink-0">
-//                   <span>Available Stock</span>
-//                   <span className="ml-2 font-extrabold text-indigo-700">{filteredProducts.length}</span>
-//                 </div>
-//               </div>
-//             </section>
-
-//             {/* Product Cards Grid */}
-//             <section className="space-y-2.5">
-//               <div className="flex items-center justify-between px-1">
+//             {/* STEP 2: PRODUCT ADD */}
+//             <section className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs sm:p-6">
+//               <div className="mb-4 flex items-center gap-3 border-b border-slate-100 pb-3">
+//                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-black text-white">
+//                   2
+//                 </span>
 //                 <div>
-//                   <h2 className="text-sm font-bold text-slate-900 sm:text-base">
-//                     Catalogue
-//                   </h2>
+//                   <h2 className="text-sm font-bold text-slate-900 sm:text-base">Add Electronic Product</h2>
 //                   <p className="text-xs text-slate-400">
-//                     Tap Add to add item into the invoice cart.
+//                     Product add karte hi neeche bill table me apne-aap aa jayega.
 //                   </p>
 //                 </div>
 //               </div>
 
-//               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-2">
-//                 {filteredProducts.map((product) => {
-//                   const cartItem = cart.find(
-//                     (item) => item.productId === product._id
-//                   );
-//                   const outOfStock = Number(product.stock) <= 0;
+//               {/* Saved product search */}
+//               <div className="relative mb-4">
+//                 <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm">
+//                   🔍
+//                 </span>
+//                 <input
+//                   value={search}
+//                   onChange={(e) => setSearch(e.target.value)}
+//                   placeholder="Saved product search karo (naam ya SKU)..."
+//                   className="w-full rounded-xl border border-slate-200 bg-slate-50/60 py-2.5 pl-10 pr-4 text-xs font-medium text-slate-900 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-600 focus:bg-white focus:ring-4 focus:ring-indigo-600/10 sm:text-sm"
+//                 />
 
-//                   return (
-//                     <div
-//                       key={product._id}
-//                       className="group flex flex-col justify-between rounded-2xl border border-slate-200/80 bg-white p-4 text-left shadow-xs transition-all duration-200 hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md"
-//                     >
-//                       <div>
-//                         <div className="mb-2 flex items-start justify-between gap-2">
-//                           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-base transition-transform group-hover:scale-105">
-//                             📦
+//                 {search.trim() && (
+//                   <div className="absolute left-0 right-0 top-full z-40 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
+//                     {filteredProducts.length === 0 ? (
+//                       <p className="px-4 py-3 text-xs text-slate-400">
+//                         Didn't find the product?. Add a new one using the form below.
+//                       </p>
+//                     ) : (
+//                       filteredProducts.map((product) => (
+//                         <button
+//                           type="button"
+//                           key={product._id}
+//                           onClick={() => addExistingProduct(product)}
+//                           className="flex w-full items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-left transition-colors last:border-0 hover:bg-indigo-50/80 cursor-pointer"
+//                         >
+//                           <div className="min-w-0">
+//                             <p className="truncate text-sm font-bold text-slate-900">{product.name}</p>
+//                             <p className="mt-0.5 truncate font-mono text-xs text-slate-400">
+//                               SKU: {product.sku || "-"} · GST {product.taxRate || 0}%
+//                             </p>
 //                           </div>
-
-//                           <span
-//                             className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${outOfStock
-//                               ? "bg-red-50 text-red-600 border border-red-200/50"
-//                               : "bg-emerald-50 text-emerald-600 border border-emerald-200/50"
-//                               }`}
-//                           >
-//                             {outOfStock ? "Out of Stock" : `Stock: ${product.stock}`}
-//                           </span>
-//                         </div>
-
-//                         <p className="line-clamp-1 font-bold text-slate-800 transition-colors group-hover:text-indigo-600 text-sm sm:text-base">
-//                           {product.name}
-//                         </p>
-
-//                         <p className="mt-0.5 truncate text-xs text-slate-400 font-mono">
-//                           SKU: {product.sku || "-"}
-//                         </p>
-//                       </div>
-
-//                       <div className="mt-4 flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
-//                         <div>
-//                           <p className="text-base sm:text-lg font-extrabold text-indigo-600">
-//                             ₹{Number(product.price || 0).toFixed(2)}
-//                           </p>
-//                           <p className="text-[10px] font-medium text-slate-400">
-//                             GST: {product.taxRate || 0}%
-//                           </p>
-//                         </div>
-
-//                         {cartItem ? (
-//                           <div className="flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 px-1.5 shadow-sm">
-//                             <button
-//                               type="button"
-//                               onClick={() => updateQty(product._id, cartItem.qty - 1)}
-//                               className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-white/20 text-xs font-bold text-white transition hover:bg-white/30 active:scale-90 cursor-pointer"
-//                               title="Decrease"
-//                             >
-//                               −
-//                             </button>
-
-//                             <span className="min-w-[1.25rem] text-center text-xs sm:text-sm font-extrabold text-white">
-//                               {cartItem.qty}
+//                           <div className="flex shrink-0 items-center gap-2">
+//                             <span className="text-sm font-extrabold text-indigo-600">
+//                               {money(product.price)}
 //                             </span>
-
-//                             <button
-//                               type="button"
-//                               onClick={() => addToCart(product)}
-//                               disabled={cartItem.qty >= Number(product.stock)}
-//                               className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-white/20 text-xs font-bold text-white transition hover:bg-white/30 active:scale-90 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-//                               title="Increase"
-//                             >
-//                               +
-//                             </button>
+//                             <span className="rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-bold text-white">
+//                               + Add
+//                             </span>
 //                           </div>
-//                         ) : (
-//                           <button
-//                             type="button"
-//                             onClick={() => addToCart(product)}
-//                             disabled={outOfStock}
-//                             className="inline-flex h-8 sm:h-9 items-center justify-center rounded-xl bg-indigo-600 px-3.5 text-xs font-bold text-white shadow-xs transition-all hover:bg-indigo-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-//                           >
-//                             + Add
-//                           </button>
-//                         )}
-//                       </div>
-//                     </div>
-//                   );
-//                 })}
-
-//                 {filteredProducts.length === 0 && (
-//                   <div className="col-span-full rounded-2xl border border-dashed border-slate-300 bg-white py-12 text-center">
-//                     <div className="text-3xl">📦</div>
-//                     <p className="mt-2 text-sm font-bold text-slate-700">
-//                       No matching products
-//                     </p>
-//                     <p className="mt-0.5 text-xs text-slate-400">
-//                       Try searching with another product term or SKU.
-//                     </p>
+//                         </button>
+//                       ))
+//                     )}
 //                   </div>
 //                 )}
 //               </div>
-//             </section>
 
-//             {/* CART TABLE VIEW */}
-//             <section className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
-//               <div className="flex items-center justify-between border-b border-slate-200/80 bg-slate-50/50 px-4 py-3.5 sm:px-5">
-//                 <div>
-//                   <h2 className="text-sm sm:text-base font-bold text-slate-900">
-//                     Selected Items
-//                   </h2>
-//                   <p className="text-xs text-slate-400">
-//                     Check item rates, tax deductions, and quantities.
-//                   </p>
+//               {/* New product form — 3 clean rows */}
+//               <form onSubmit={handleAddProduct} noValidate className="space-y-3">
+//                 {/* Row 1: Name (full width) */}
+//                 <TextInput
+//                   label="Product Name"
+//                   value={productForm.name}
+//                   onChange={(e) => handleProductFormChange("name", e.target.value)}
+//                   placeholder="e.g. Voltas 1.5 Ton AC"
+//                   required
+//                   error={productErrors.name}
+//                 />
+
+//                 {/* Row 2: SKU, HSN, Price, GST */}
+//                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+//                   <TextInput
+//                     label="SKU / Model"
+//                     value={productForm.sku}
+//                     onChange={(e) => handleProductFormChange("sku", e.target.value)}
+//                     placeholder="Auto if empty"
+//                     mono
+//                     error={productErrors.sku}
+//                   />
+//                   <TextInput
+//                     label="HSN Code"
+//                     value={productForm.hsn}
+//                     onChange={(e) => handleProductFormChange("hsn", e.target.value)}
+//                     placeholder="e.g. 8415"
+//                     mono
+//                     error={productErrors.hsn}
+//                   />
+//                   <TextInput
+//                     label="Price (₹)"
+//                     type="number"
+//                     min="0"
+//                     inputMode="decimal"
+//                     value={productForm.price}
+//                     onChange={(e) => handleProductFormChange("price", e.target.value)}
+//                     placeholder="0.00"
+//                     mono
+//                     required
+//                     error={productErrors.price}
+//                   />
+//                   <GstSelect
+//                     value={productForm.taxRate}
+//                     onChange={(e) => handleProductFormChange("taxRate", e.target.value)}
+//                     error={productErrors.taxRate}
+//                   />
 //                 </div>
 
+//                 {/* Row 3: Qty + Add button */}
+//                 <div className="flex items-end gap-3">
+//                   <div className="w-28 shrink-0">
+//                     <TextInput
+//                       label="Qty"
+//                       type="number"
+//                       min="1"
+//                       inputMode="numeric"
+//                       value={productForm.qty}
+//                       onChange={(e) => handleProductFormChange("qty", e.target.value)}
+//                       mono
+//                       error={productErrors.qty}
+//                     />
+//                   </div>
+
+//                   <button
+//                     type="submit"
+//                     disabled={addingProduct}
+//                     className="inline-flex h-[42px] flex-1 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-4 text-sm font-bold text-white shadow-xs transition-all hover:bg-indigo-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-50 cursor-pointer"
+//                   >
+//                     {addingProduct ? (
+//                       <>
+//                         <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+//                         <span>Adding...</span>
+//                       </>
+//                     ) : (
+//                       <span>+ Add to Bill</span>
+//                     )}
+//                   </button>
+//                 </div>
+//               </form>
+//             </section>
+
+//             {/* STEP 3: ITEMS TABLE */}
+//             <section className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
+//               <div className="flex items-center justify-between gap-3 border-b border-slate-200/80 bg-slate-50/50 px-4 py-3.5 sm:px-5">
+//                 <div className="flex items-center gap-3">
+//                   <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-600 text-sm font-black text-white">
+//                     3
+//                   </span>
+//                   <div>
+//                     <h2 className="text-sm font-bold text-slate-900 sm:text-base">Invoice Items</h2>
+//                     <p className="text-xs text-slate-400">
+//                       Row par click karo ya Edit / Delete dabao.
+//                     </p>
+//                   </div>
+//                 </div>
 //                 <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-0.5 text-xs font-bold text-indigo-700">
-//                   {cart.length} in Cart
+//                   {cart.length} item{cart.length !== 1 ? "s" : ""}
 //                 </span>
 //               </div>
 
-//               {/* Responsive Table Wrapper */}
-//               <div className="overflow-x-auto">
-//                 <table className="w-full min-w-[650px] border-collapse text-left text-xs sm:text-sm">
-//                   <thead>
-//                     <tr className="border-b border-slate-200 bg-slate-100/70 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-//                       <th className="px-3 py-3 text-center">#</th>
-//                       <th className="px-3 py-3">Product</th>
-//                       <th className="px-3 py-3">SKU</th>
-//                       <th className="px-3 py-3 text-center">Qty</th>
-//                       <th className="px-3 py-3 text-right">Price</th>
-//                       <th className="px-3 py-3 text-center">GST</th>
-//                       <th className="px-3 py-3 text-right">Tax</th>
-//                       <th className="px-3 py-3 text-right">Total</th>
-//                       <th className="px-3 py-3 text-center">Del</th>
-//                     </tr>
-//                   </thead>
+//               {cart.length === 0 ? (
+//                 <div className="py-14 text-center">
+//                   <div className="text-3xl">🧾</div>
+//                   <p className="mt-2 text-sm font-semibold text-slate-600">
+//                     Abhi koi item nahi hai
+//                   </p>
+//                   <p className="text-xs text-slate-400">
+//                     Upar se product add karo ya saved product search karo.
+//                   </p>
+//                 </div>
+//               ) : (
+//                 <>
+//                   {/* TABLET / DESKTOP TABLE */}
+//                   <div className="hidden overflow-x-auto md:block">
+//                     <table className="w-full min-w-[560px] border-collapse text-left text-sm">
+//                       <thead>
+//                         <tr className="border-b border-slate-200 bg-slate-100/70 text-[11px] font-bold uppercase tracking-wider text-slate-500">
+//                           <th className="w-10 px-3 py-3 text-center">#</th>
+//                           <th className="px-3 py-3">Product</th>
+//                           <th className="px-3 py-3 text-center">Qty</th>
+//                           <th className="px-3 py-3 text-right">Total</th>
+//                           <th className="px-3 py-3 text-right">Action</th>
+//                         </tr>
+//                       </thead>
+//                       <tbody className="divide-y divide-slate-100 font-medium">
+//                         {cart.map((item, index) => {
+//                           const taxable = item.price * item.qty;
+//                           const tax = (taxable * item.taxRate) / 100;
+//                           return (
+//                             <tr
+//                               key={item.productId}
+//                               onClick={() => openEdit(item)}
+//                               className="cursor-pointer transition-colors hover:bg-indigo-50/50"
+//                               title="Click to edit"
+//                             >
+//                               <td className="px-3 py-3 text-center font-mono text-xs text-slate-400">
+//                                 {index + 1}
+//                               </td>
+//                               <td className="max-w-[220px] px-3 py-3">
+//                                 <p className="truncate font-bold text-slate-800">{item.name}</p>
+//                                 <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
+//                                   {money(item.price)}
+//                                   <span className="mx-1 text-slate-300">|</span>
+//                                   <span className="text-amber-600">GST {item.taxRate}%</span>
+//                                 </p>
+//                                 <p className="truncate font-mono text-[10px] text-slate-400">
+//                                   {item.hsn ? `HSN: ${item.hsn} · ` : ""}SKU: {item.sku}
+//                                 </p>
+//                               </td>
+//                               <td className="px-3 py-3 text-center">{renderQty(item)}</td>
+//                               <td className="whitespace-nowrap px-3 py-3 text-right">
+//                                 <p className="font-black text-slate-900">{money(taxable + tax)}</p>
+//                                 <p className="text-[10px] text-slate-400">incl. tax {money(tax)}</p>
+//                               </td>
+//                               <td className="px-3 py-3">{renderActions(item)}</td>
+//                             </tr>
+//                           );
+//                         })}
+//                       </tbody>
+//                       <tfoot>
+//                         <tr className="border-t-2 border-slate-200 bg-slate-50">
+//                           <td colSpan={3} className="px-3 py-3 text-right text-xs font-bold uppercase tracking-wider text-slate-500">
+//                             Grand Total ({totalItems} Pcs)
+//                           </td>
+//                           <td className="whitespace-nowrap px-3 py-3 text-right text-base font-black text-indigo-700">
+//                             {money(grandTotal)}
+//                           </td>
+//                           <td />
+//                         </tr>
+//                       </tfoot>
+//                     </table>
+//                   </div>
 
-//                   <tbody className="divide-y divide-slate-100 font-medium">
-//                     {cart.length === 0 ? (
-//                       <tr>
-//                         <td colSpan="9" className="py-12 text-center text-slate-400">
-//                           <div className="text-3xl">🧾</div>
-//                           <p className="mt-2 text-sm font-semibold text-slate-600">
-//                             No items in current invoice
-//                           </p>
-//                           <p className="text-xs text-slate-400">
-//                             Click on Catalogue &apos;+ Add&apos; button above.
-//                           </p>
-//                         </td>
-//                       </tr>
-//                     ) : (
-//                       cart.map((item, index) => {
-//                         const taxable = item.price * item.qty;
-//                         const tax = (taxable * item.taxRate) / 100;
-//                         const total = taxable + tax;
+//                   {/* MOBILE CARDS */}
+//                   <div className="space-y-3 p-3 md:hidden">
+//                     {cart.map((item, index) => {
+//                       const taxable = item.price * item.qty;
+//                       const tax = (taxable * item.taxRate) / 100;
+//                       return (
+//                         <div
+//                           key={item.productId}
+//                           onClick={() => openEdit(item)}
+//                           className="cursor-pointer rounded-xl border border-slate-200 bg-white p-3 shadow-xs transition active:bg-indigo-50/50"
+//                         >
+//                           <div className="min-w-0">
+//                             <p className="text-[10px] font-bold text-slate-400">#{index + 1}</p>
+//                             <p className="truncate text-sm font-bold text-slate-900">{item.name}</p>
+//                             <p className="mt-0.5 text-[11px] font-semibold text-slate-500">
+//                               {money(item.price)} <span className="text-slate-300">|</span>{" "}
+//                               <span className="text-amber-600">GST {item.taxRate}%</span>
+//                             </p>
+//                             <p className="truncate font-mono text-[10px] text-slate-400">
+//                               {item.hsn ? `HSN: ${item.hsn} · ` : ""}SKU: {item.sku}
+//                             </p>
+//                           </div>
 
-//                         return (
-//                           <tr
-//                             key={item.productId}
-//                             className="transition-colors hover:bg-slate-50/80"
-//                           >
-//                             <td className="px-3 py-3 text-center text-slate-400 font-mono text-xs">
-//                               {index + 1}
-//                             </td>
+//                           <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
+//                             {renderQty(item)}
+//                             <div className="text-right">
+//                               <p className="text-base font-black text-slate-900">{money(taxable + tax)}</p>
+//                               <p className="text-[10px] text-slate-400">incl. tax {money(tax)}</p>
+//                             </div>
+//                           </div>
 
-//                             <td className="max-w-[200px] truncate px-3 py-3 font-bold text-slate-800">
-//                               {item.name}
-//                             </td>
+//                           <div className="mt-3 border-t border-slate-100 pt-3">{renderActions(item)}</div>
+//                         </div>
+//                       );
+//                     })}
 
-//                             <td className="px-3 py-3 text-xs text-slate-400 font-mono">
-//                               {item.sku}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-center">
-//                               <input
-//                                 type="number"
-//                                 min="1"
-//                                 max={item.stock}
-//                                 value={item.qty}
-//                                 onChange={(e) => updateQty(item.productId, e.target.value)}
-//                                 className="w-14 rounded-lg border border-slate-200 bg-slate-50 py-1 text-center font-bold text-slate-800 outline-none focus:border-indigo-600 focus:bg-white focus:ring-2 focus:ring-indigo-100 font-mono"
-//                               />
-//                             </td>
-
-//                             <td className="px-3 py-3 text-right text-slate-700">
-//                               ₹{item.price.toFixed(2)}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-center">
-//                               <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700">
-//                                 {item.taxRate}%
-//                               </span>
-//                             </td>
-
-//                             <td className="px-3 py-3 text-right text-slate-600 font-medium">
-//                               ₹{tax.toFixed(2)}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-right font-black text-slate-900">
-//                               ₹{total.toFixed(2)}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-center">
-//                               <button
-//                                 type="button"
-//                                 onClick={() => removeItem(item.productId)}
-//                                 className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 cursor-pointer"
-//                                 title="Remove item"
-//                               >
-//                                 ✕
-//                               </button>
-//                             </td>
-//                           </tr>
-//                         );
-//                       })
-//                     )}
-//                   </tbody>
-//                 </table>
-//               </div>
+//                     <div className="flex items-center justify-between rounded-xl bg-slate-50 px-4 py-3">
+//                       <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+//                         Grand Total ({totalItems} Pcs)
+//                       </span>
+//                       <span className="text-base font-black text-indigo-700">{money(grandTotal)}</span>
+//                     </div>
+//                   </div>
+//                 </>
+//               )}
 //             </section>
 //           </main>
 
-//           {/* RIGHT: BILL SUMMARY & CHECKOUT */}
+//           {/* RIGHT: SUMMARY */}
 //           <aside className="w-full lg:sticky lg:top-6 lg:self-start">
 //             <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
-
 //               <div className="flex items-center justify-between border-b border-slate-200/80 px-5 py-4">
 //                 <div>
-//                   <h2 className="text-base font-extrabold text-slate-900">
-//                     Bill Summary
-//                   </h2>
-//                   <p className="text-xs text-slate-400">
-//                     Payment details & dispatch breakdown.
-//                   </p>
+//                   <h2 className="text-base font-extrabold text-slate-900">Bill Summary</h2>
+//                   <p className="text-xs text-slate-400">Payment details & breakdown.</p>
 //                 </div>
 //                 <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-base">
 //                   💳
 //                 </span>
 //               </div>
 
-//               <div className="p-4 sm:p-5 space-y-4">
-
-//                 {/* Active Customer Badge */}
+//               <div className="space-y-4 p-4 sm:p-5">
 //                 <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3">
 //                   <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
 //                     Billed To
@@ -3010,36 +3615,38 @@ export default function BillingPage() {
 //                     {selectedCustomer.name || "Walk-in Customer"}
 //                   </p>
 //                   {selectedCustomer.phone && (
-//                     <p className="mt-0.5 text-xs text-slate-500 font-mono">
+//                     <p className="mt-0.5 font-mono text-xs text-slate-500">
 //                       Phone: {selectedCustomer.phone}
 //                     </p>
 //                   )}
 //                   {selectedCustomer.gstin && (
-//                     <p className="mt-0.5 text-xs font-bold text-indigo-700 font-mono uppercase">
+//                     <p className="mt-0.5 font-mono text-xs font-bold uppercase text-indigo-700">
 //                       GSTIN: {selectedCustomer.gstin}
 //                     </p>
 //                   )}
 //                 </div>
 
-//                 {/* Amount Computations */}
 //                 <div className="space-y-2.5 text-xs sm:text-sm">
-//                   <div className="flex items-center justify-between text-slate-500 font-medium">
+//                   <div className="flex items-center justify-between font-medium text-slate-500">
 //                     <span>Total Quantity</span>
 //                     <span className="font-bold text-slate-800">{totalItems} Pcs</span>
 //                   </div>
-//                   <div className="flex items-center justify-between text-slate-500 font-medium">
+//                   <div className="flex items-center justify-between font-medium text-s late-500">
 //                     <span>Taxable Base</span>
-//                     <span className="font-semibold text-slate-800">₹{subtotal.toFixed(2)}</span>
+//                     <span className="font-semibold text-slate-800">{money(subtotal)}</span>
 //                   </div>
-//                   <div className="flex items-center justify-between text-slate-500 font-medium">
-//                     <span>GST (CGST + SGST)</span>
-//                     <span className="font-semibold text-amber-600">₹{taxTotal.toFixed(2)}</span>
+//                   <div className="flex items-center justify-between font-medium text-slate-500">
+//                     <span>CGST</span>
+//                     <span className="font-semibold text-amber-600">{money(cgstTotal)}</span>
+//                   </div>
+//                   <div className="flex items-center justify-between font-medium text-slate-500">
+//                     <span>SGST</span>
+//                     <span className="font-semibold text-amber-600">{money(sgstTotal)}</span>
 //                   </div>
 //                 </div>
 
-//                 {/* Grand Total Box */}
 //                 <div className="rounded-xl bg-[#0e1726] p-4 text-white shadow-inner">
-//                   <div className="flex items-center justify-between">
+//                   <div className="flex items-center justify-between gap-2">
 //                     <div>
 //                       <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
 //                         Total Amount Due
@@ -3048,13 +3655,12 @@ export default function BillingPage() {
 //                         ₹{grandTotal.toFixed(2)}
 //                       </p>
 //                     </div>
-//                     <span className="rounded-full bg-emerald-500/20 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400 border border-emerald-500/30">
-//                       INR Total
+//                     <span className="rounded-full border border-emerald-500/30 bg-emerald-500/20 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400">
+//                       INR
 //                     </span>
 //                   </div>
 //                 </div>
 
-//                 {/* Payment Selector */}
 //                 <div>
 //                   <label className="mb-1.5 block text-xs font-bold text-slate-600">
 //                     Payment Channel
@@ -3071,7 +3677,7 @@ export default function BillingPage() {
 //                           key={method.value}
 //                           type="button"
 //                           onClick={() => setPaymentMethod(method.value)}
-//                           className={`flex flex-col items-center justify-center rounded-xl border py-2.5 transition-all cursor-pointer ${active
+//                           className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border py-2.5 transition-all ${active
 //                             ? "border-indigo-600 bg-indigo-50/80 text-indigo-700 shadow-xs"
 //                             : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
 //                             }`}
@@ -3084,12 +3690,11 @@ export default function BillingPage() {
 //                   </div>
 //                 </div>
 
-//                 {/* Checkout Button */}
 //                 <button
 //                   type="button"
 //                   onClick={checkout}
 //                   disabled={cart.length === 0 || generating}
-//                   className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-sm font-bold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
+//                   className="flex w-full cursor-pointer items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-sm font-bold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40"
 //                 >
 //                   {generating ? (
 //                     <>
@@ -3105,1455 +3710,145 @@ export default function BillingPage() {
 //                 </button>
 
 //                 <p className="text-center text-[10px] text-slate-400">
-//                   Mobile devices par PDF download hogi, Desktop par preview open hoga.
+//                   Mobile par PDF download hogi, Desktop par preview open hoga.
 //                 </p>
 //               </div>
 //             </div>
 //           </aside>
 //         </div>
 //       </div>
-//     </div>
-//   );
-// }
 
-
-
-// "use client";
-
-// import { setActiveCustomer } from "@/lib/activeCustomer";
-// import { useEffect, useMemo, useState } from "react";
-// import api from "@/lib/api";
-// import jsPDF from "jspdf";
-// import autoTable from "jspdf-autotable";
-// import { toast } from "react-toastify";
-
-// const emptyCustomer = {
-//   _id: "",
-//   name: "",
-//   phone: "",
-//   email: "",
-//   address: "",
-//   gstin: "",
-// };
-
-// // =========================================================
-// // SELLER / COMPANY DETAILS
-// // =========================================================
-// const COMPANY = {
-//   name: "BALOTHIA REFREJOREON",
-//   addressLine1: "Plot No. 36, Agra Road, Sumel Road,",
-//   addressLine2: "Pooja Vihar, Jaipur, Rajasthan - 302031",
-//   gstin: "08AKXPU5096P1ZM",
-//   state: "Rajasthan (08)",
-//   mobile: "7877669506",
-//   email: "balothiarefrigeration@gmail.com",
-//   placeOfSupply: "Rajasthan",
-//   bank: {
-//     accountName: "BALOTHIA REFREJOREON",
-//     bankName: "IDFC FIRST",
-//     branch: "Raja Park-Jaipur Branch",
-//     accountNo: "57891782557",
-//     ifsc: "IDFB0042129",
-//     swift: "IDFBINBBMUM",
-//   },
-// };
-
-// export default function BillingPage() {
-//   const [products, setProducts] = useState([]);
-//   const [customers, setCustomers] = useState([]);
-
-//   const [search, setSearch] = useState("");
-//   const [customerSearch, setCustomerSearch] = useState("");
-
-//   const [cart, setCart] = useState([]);
-//   const [selectedCustomer, setSelectedCustomer] = useState(emptyCustomer);
-
-//   const [paymentMethod, setPaymentMethod] = useState("cash");
-
-//   const [loading, setLoading] = useState(true);
-//   const [generating, setGenerating] = useState(false);
-
-//   // =========================================================
-//   // LOAD PRODUCTS + CUSTOMERS
-//   // =========================================================
-//   useEffect(() => {
-//     const loadData = async () => {
-//       try {
-//         const [productsRes, customersRes] = await Promise.all([
-//           api.get("/products"),
-//           api.get("/customers"),
-//         ]);
-
-//         setProducts(
-//           Array.isArray(productsRes.data) ? productsRes.data : []
-//         );
-
-//         setCustomers(
-//           Array.isArray(customersRes.data) ? customersRes.data : []
-//         );
-//       } catch (error) {
-//         toast.error(
-//           `Data loading error: ${error.response?.data?.message || error.message
-//           }`
-//         );
-//       } finally {
-//         setLoading(false);
-//       }
-//     };
-
-//     loadData();
-//   }, []);
-
-//   // =========================================================
-//   // RESTORE SELECTED CUSTOMER
-//   // =========================================================
-//   useEffect(() => {
-//     const savedCustomer = sessionStorage.getItem("selectedCustomer");
-
-//     if (savedCustomer) {
-//       try {
-//         const customer = JSON.parse(savedCustomer);
-
-//         const customerData = {
-//           _id: customer._id || "",
-//           name: customer.name || "",
-//           phone: customer.phone || "",
-//           email: customer.email || "",
-//           address: customer.address || "",
-//           gstin: customer.gstin || customer.gst || customer.gstNo || customer.gstNumber || "",
-//         };
-
-//         setSelectedCustomer(customerData);
-//         setActiveCustomer(customerData);
-
-//         sessionStorage.removeItem("selectedCustomer");
-//       } catch (error) {
-//         console.error("Selected customer error:", error);
-//       }
-//     }
-//   }, []);
-
-//   // =========================================================
-//   // FILTER PRODUCTS
-//   // =========================================================
-//   const filteredProducts = useMemo(() => {
-//     const value = search.toLowerCase().trim();
-
-//     return products.filter((product) => {
-//       return (
-//         product.name?.toLowerCase().includes(value) ||
-//         product.sku?.toLowerCase().includes(value)
-//       );
-//     });
-//   }, [products, search]);
-
-//   // =========================================================
-//   // FILTER CUSTOMERS
-//   // =========================================================
-//   const filteredCustomers = useMemo(() => {
-//     const value = customerSearch.toLowerCase().trim();
-
-//     if (!value) {
-//       return customers.slice(0, 8);
-//     }
-
-//     return customers.filter((customer) => {
-//       return (
-//         customer.name?.toLowerCase().includes(value) ||
-//         customer.phone?.toLowerCase().includes(value) ||
-//         customer.email?.toLowerCase().includes(value) ||
-//         customer.gstin?.toLowerCase().includes(value) ||
-//         customer.gst?.toLowerCase().includes(value)
-//       );
-//     });
-//   }, [customers, customerSearch]);
-
-//   // =========================================================
-//   // SELECT CUSTOMER
-//   // =========================================================
-//   const selectCustomer = (customer) => {
-//     const customerData = {
-//       _id: customer._id || "",
-//       name: customer.name || "",
-//       phone: customer.phone || "",
-//       email: customer.email || "",
-//       address: customer.address || "",
-//       gstin: customer.gstin || customer.gst || customer.gstNo || customer.gstNumber || "",
-//     };
-
-//     setSelectedCustomer(customerData);
-//     setActiveCustomer(customerData);
-//     setCustomerSearch("");
-//   };
-
-//   // =========================================================
-//   // MANUAL EDIT OF CUSTOMER FIELDS
-//   // =========================================================
-//   const updateCustomerField = (field, value) => {
-//     setSelectedCustomer((prev) => {
-//       const next = { ...prev, [field]: value };
-//       setActiveCustomer(next);
-//       return next;
-//     });
-//   };
-
-//   // =========================================================
-//   // CLEAR CUSTOMER
-//   // =========================================================
-//   const clearCustomer = () => {
-//     setSelectedCustomer(emptyCustomer);
-//     setActiveCustomer(null);
-//     setCustomerSearch("");
-//   };
-
-//   // =========================================================
-//   // ADD PRODUCT TO CART
-//   // =========================================================
-//   const addToCart = (product) => {
-//     if (Number(product.stock) <= 0) {
-//       toast.warn("This product is out of stock.");
-//       return;
-//     }
-
-//     setCart((prev) => {
-//       const existing = prev.find(
-//         (item) => item.productId === product._id
-//       );
-
-//       if (existing) {
-//         if (existing.qty >= Number(product.stock)) {
-//           toast.warn("Stock limit reached for this product.");
-//           return prev;
-//         }
-
-//         return prev.map((item) =>
-//           item.productId === product._id
-//             ? {
-//               ...item,
-//               qty: item.qty + 1,
-//             }
-//             : item
-//         );
-//       }
-
-//       return [
-//         ...prev,
-//         {
-//           productId: product._id,
-//           name: product.name,
-//           sku: product.sku || "-",
-//           hsn: product.hsn || product.hsnCode || "-",
-//           price: Number(product.price || 0),
-//           taxRate: Number(product.taxRate || 0),
-//           stock: Number(product.stock || 0),
-//           qty: 1,
-//         },
-//       ];
-//     });
-//   };
-
-//   // =========================================================
-//   // UPDATE QTY
-//   // =========================================================
-//   const updateQty = (productId, qty) => {
-//     const newQty = Number(qty);
-
-//     if (newQty <= 0 || Number.isNaN(newQty)) {
-//       setCart((prev) =>
-//         prev.filter((item) => item.productId !== productId)
-//       );
-//       return;
-//     }
-
-//     setCart((prev) =>
-//       prev.map((item) =>
-//         item.productId === productId
-//           ? {
-//             ...item,
-//             qty:
-//               item.stock && newQty > item.stock
-//                 ? item.stock
-//                 : newQty,
-//           }
-//           : item
-//       )
-//     );
-//   };
-
-//   // =========================================================
-//   // REMOVE ITEM
-//   // =========================================================
-//   const removeItem = (productId) => {
-//     setCart((prev) =>
-//       prev.filter((item) => item.productId !== productId)
-//     );
-//   };
-
-//   // =========================================================
-//   // CALCULATIONS
-//   // =========================================================
-//   const totalItems = cart.reduce(
-//     (sum, item) => sum + Number(item.qty || 0),
-//     0
-//   );
-
-//   const subtotal = cart.reduce(
-//     (sum, item) =>
-//       sum + Number(item.price || 0) * Number(item.qty || 0),
-//     0
-//   );
-
-//   const taxTotal = cart.reduce(
-//     (sum, item) =>
-//       sum +
-//       (Number(item.price || 0) *
-//         Number(item.qty || 0) *
-//         Number(item.taxRate || 0)) /
-//       100,
-//     0
-//   );
-
-//   const grandTotal = subtotal + taxTotal;
-
-//   const cgstTotal = taxTotal / 2;
-//   const sgstTotal = taxTotal / 2;
-//   const effectiveTaxRate =
-//     subtotal > 0 ? (taxTotal / subtotal) * 100 : 0;
-//   const halfTaxRate = effectiveTaxRate / 2;
-
-//   // =========================================================
-//   // NUMBER TO WORDS
-//   // =========================================================
-//   const numberToWords = (amount) => {
-//     const ones = [
-//       "",
-//       "One",
-//       "Two",
-//       "Three",
-//       "Four",
-//       "Five",
-//       "Six",
-//       "Seven",
-//       "Eight",
-//       "Nine",
-//       "Ten",
-//       "Eleven",
-//       "Twelve",
-//       "Thirteen",
-//       "Fourteen",
-//       "Fifteen",
-//       "Sixteen",
-//       "Seventeen",
-//       "Eighteen",
-//       "Nineteen",
-//     ];
-
-//     const tens = [
-//       "",
-//       "",
-//       "Twenty",
-//       "Thirty",
-//       "Forty",
-//       "Fifty",
-//       "Sixty",
-//       "Seventy",
-//       "Eighty",
-//       "Ninety",
-//     ];
-
-//     const convert = (num) => {
-//       if (num < 20) return ones[num];
-//       if (num < 100)
-//         return (
-//           tens[Math.floor(num / 10)] +
-//           (num % 10 ? " " + ones[num % 10] : "")
-//         );
-//       if (num < 1000)
-//         return (
-//           ones[Math.floor(num / 100)] +
-//           " Hundred" +
-//           (num % 100 ? " " + convert(num % 100) : "")
-//         );
-//       if (num < 100000)
-//         return (
-//           convert(Math.floor(num / 1000)) +
-//           " Thousand" +
-//           (num % 1000 ? " " + convert(num % 1000) : "")
-//         );
-//       if (num < 10000000)
-//         return (
-//           convert(Math.floor(num / 100000)) +
-//           " Lakh" +
-//           (num % 100000 ? " " + convert(num % 100000) : "")
-//         );
-//       return (
-//         convert(Math.floor(num / 10000000)) +
-//         " Crore" +
-//         (num % 10000000 ? " " + convert(num % 10000000) : "")
-//       );
-//     };
-
-//     const rupees = Math.floor(amount);
-//     const paise = Math.round((amount - rupees) * 100);
-
-//     let result =
-//       rupees === 0
-//         ? "Zero Rupees"
-//         : `${convert(rupees)} Rupees`;
-
-//     if (paise > 0) {
-//       result += ` and ${convert(paise)} Paise`;
-//     }
-
-//     return `${result} Only`;
-//   };
-
-//   // =========================================================
-//   // GENERATE PDF
-//   // =========================================================
-//   const generateInvoicePDF = (invoiceNumber) => {
-//     const doc = new jsPDF({
-//       orientation: "portrait",
-//       unit: "mm",
-//       format: "a4",
-//     });
-
-//     const pageWidth = doc.internal.pageSize.getWidth();
-//     const pageHeight = doc.internal.pageSize.getHeight();
-//     const margin = 10;
-//     const contentWidth = pageWidth - margin * 2;
-
-//     const COLOR_ICE_BLUE = [237, 244, 250];
-//     const COLOR_NAVY_TEXT = [16, 76, 126];
-//     const COLOR_ORANGE = [237, 125, 32];
-//     const COLOR_BORDER = [205, 218, 228];
-
-//     doc.setDrawColor(...COLOR_BORDER);
-//     doc.setLineWidth(0.35);
-//     doc.rect(
-//       margin,
-//       margin,
-//       contentWidth,
-//       pageHeight - margin * 2
-//     );
-
-//     const headerBannerHeight = 11;
-//     doc.setFillColor(...COLOR_ICE_BLUE);
-//     doc.rect(margin, margin, contentWidth, headerBannerHeight, "F");
-
-//     doc.setDrawColor(...COLOR_BORDER);
-//     doc.setLineWidth(0.3);
-//     doc.line(
-//       margin + contentWidth * 0.65,
-//       margin,
-//       margin + contentWidth * 0.65,
-//       margin + headerBannerHeight
-//     );
-
-//     doc.setDrawColor(...COLOR_ORANGE);
-//     doc.setLineWidth(0.7);
-//     doc.line(
-//       margin,
-//       margin + headerBannerHeight,
-//       margin + contentWidth,
-//       margin + headerBannerHeight
-//     );
-
-//     doc.setFont("helvetica", "bold");
-//     doc.setFontSize(12);
-//     doc.setTextColor(...COLOR_NAVY_TEXT);
-//     doc.text(COMPANY.name, margin + 4, margin + 7.5);
-
-//     doc.setFont("helvetica", "bold");
-//     doc.setFontSize(11);
-//     doc.text("TAX INVOICE", margin + contentWidth * 0.68, margin + 7.5);
-
-//     doc.setFont("helvetica", "normal");
-//     doc.setFontSize(8.5);
-//     doc.setTextColor(80, 80, 80);
-//     doc.text(COMPANY.addressLine1, margin + 4, 27);
-//     doc.text(COMPANY.addressLine2, margin + 4, 32);
-//     doc.text(`GSTIN: ${COMPANY.gstin}`, margin + 4, 37);
-//     doc.text(`State: ${COMPANY.state}`, margin + 4, 42);
-//     doc.text(
-//       `Mobile: ${COMPANY.mobile}   Email: ${COMPANY.email}`,
-//       margin + 4,
-//       47
-//     );
-
-//     doc.setFont("helvetica", "normal");
-//     doc.setFontSize(8.5);
-//     doc.setTextColor(60, 60, 60);
-//     doc.text(
-//       `Invoice No.: ${invoiceNumber}`,
-//       pageWidth - margin - 4,
-//       27,
-//       { align: "right" }
-//     );
-//     doc.text(
-//       `Invoice Date: ${new Date().toLocaleDateString("en-IN")}`,
-//       pageWidth - margin - 4,
-//       32,
-//       { align: "right" }
-//     );
-//     doc.text(
-//       `Place of Supply: ${COMPANY.placeOfSupply}`,
-//       pageWidth - margin - 4,
-//       37,
-//       { align: "right" }
-//     );
-//     doc.text(
-//       "Reverse Charge: No",
-//       pageWidth - margin - 4,
-//       42,
-//       { align: "right" }
-//     );
-//     doc.text(
-//       `Payment: ${paymentMethod.toUpperCase()}`,
-//       pageWidth - margin - 4,
-//       47,
-//       { align: "right" }
-//     );
-
-//     doc.setDrawColor(...COLOR_BORDER);
-//     doc.setLineWidth(0.3);
-//     doc.line(margin, 51, pageWidth - margin, 51);
-
-//     const buyerHeaderY = 53;
-//     const buyerHeaderHeight = 6.5;
-
-//     doc.setFillColor(...COLOR_ICE_BLUE);
-//     doc.rect(margin, buyerHeaderY, contentWidth, buyerHeaderHeight, "F");
-
-//     doc.setFont("helvetica", "bold");
-//     doc.setFontSize(8.5);
-//     doc.setTextColor(...COLOR_NAVY_TEXT);
-//     doc.text("BUYER (BILL TO)", margin + 4, buyerHeaderY + 4.6);
-
-//     const buyerMaxWidth = contentWidth - 8;
-//     let buyerY = buyerHeaderY + buyerHeaderHeight + 4;
-
-//     const buyerName =
-//       (selectedCustomer.name || "").trim() || "Walk-in Customer";
-//     const buyerAddress = (selectedCustomer.address || "").trim();
-
-//     const nameLocationLine = buyerAddress
-//       ? `${buyerName}, ${buyerAddress}`
-//       : buyerName;
-
-//     doc.setFont("helvetica", "bold");
-//     doc.setFontSize(8.5);
-//     doc.setTextColor(30, 30, 30);
-//     const nameLocationLines = doc.splitTextToSize(
-//       nameLocationLine,
-//       buyerMaxWidth
-//     );
-//     doc.text(nameLocationLines, margin + 4, buyerY);
-//     buyerY += nameLocationLines.length * 4 + 1;
-
-//     // GSTIN value extraction
-//     const rawGstin =
-//       selectedCustomer.gstin ||
-//       selectedCustomer.gst ||
-//       selectedCustomer.gstNo ||
-//       selectedCustomer.gstNumber ||
-//       "";
-//     const customerGstin = String(rawGstin).trim().toUpperCase() || "-";
-
-//     doc.setFont("helvetica", "normal");
-//     doc.setFontSize(8);
-//     doc.setTextColor(70, 70, 70);
-//     doc.text(
-//       `Phone: ${(selectedCustomer.phone || "").trim() || "-"}   Email: ${(selectedCustomer.email || "").trim() || "-"
-//       }   GSTIN: ${customerGstin}`,
-//       margin + 4,
-//       buyerY
-//     );
-//     buyerY += 4.5;
-
-//     const itemsTableStartY = Math.max(76, buyerY + 2);
-
-//     const tableRows = cart.map((item, index) => {
-//       const amount = item.price * item.qty;
-//       return [
-//         index + 1,
-//         item.name,
-//         item.hsn || "-",
-//         item.qty,
-//         `Rs. ${item.price.toFixed(2)}`,
-//         `Rs. ${amount.toFixed(2)}`,
-//       ];
-//     });
-
-//     autoTable(doc, {
-//       startY: itemsTableStartY,
-//       margin: { left: margin, right: margin },
-//       head: [["S.No.", "Description", "HSN/SAC", "Qty", "Rate", "Amount"]],
-//       body: tableRows,
-//       theme: "grid",
-//       styles: {
-//         font: "helvetica",
-//         fontSize: 8,
-//         cellPadding: 2.8,
-//         lineColor: COLOR_BORDER,
-//         lineWidth: 0.25,
-//         textColor: [50, 50, 50],
-//       },
-//       headStyles: {
-//         fillColor: COLOR_ICE_BLUE,
-//         textColor: COLOR_NAVY_TEXT,
-//         fontStyle: "bold",
-//         halign: "center",
-//       },
-//       columnStyles: {
-//         0: { halign: "center", cellWidth: 14 },
-//         1: { cellWidth: 78 },
-//         2: { halign: "center", cellWidth: 24 },
-//         3: { halign: "center", cellWidth: 18 },
-//         4: { halign: "right", cellWidth: 28 },
-//         5: { halign: "right", cellWidth: 28 },
-//       },
-//     });
-
-//     const summaryWidth = 85;
-//     const summaryStartX = pageWidth - margin - summaryWidth;
-//     const summaryStartY = doc.lastAutoTable.finalY + 4;
-
-//     autoTable(doc, {
-//       startY: summaryStartY,
-//       margin: { left: summaryStartX, right: margin },
-//       tableWidth: summaryWidth,
-//       body: [
-//         ["Taxable Value", `Rs. ${subtotal.toFixed(2)}`],
-//         [`CGST @ ${halfTaxRate.toFixed(1)}%`, `Rs. ${cgstTotal.toFixed(2)}`],
-//         [`SGST @ ${halfTaxRate.toFixed(1)}%`, `Rs. ${sgstTotal.toFixed(2)}`],
-//         ["TOTAL PAYABLE", `Rs. ${grandTotal.toFixed(2)}`],
-//       ],
-//       theme: "grid",
-//       styles: {
-//         font: "helvetica",
-//         fontSize: 8,
-//         cellPadding: 2.5,
-//         lineColor: COLOR_BORDER,
-//         lineWidth: 0.2,
-//       },
-//       columnStyles: {
-//         0: { cellWidth: 45, textColor: [60, 60, 60] },
-//         1: {
-//           cellWidth: 40,
-//           halign: "right",
-//           fontStyle: "bold",
-//           textColor: [30, 30, 30],
-//         },
-//       },
-//       didParseCell: function (data) {
-//         if (data.row.index === 3) {
-//           data.cell.styles.fillColor = COLOR_ORANGE;
-//           data.cell.styles.textColor = [255, 255, 255];
-//           data.cell.styles.fontStyle = "bold";
-//           data.cell.styles.fontSize = 8.8;
-//         }
-//       },
-//     });
-
-//     let cursorY = doc.lastAutoTable.finalY + 5;
-
-//     doc.setFillColor(...COLOR_ICE_BLUE);
-//     doc.setDrawColor(...COLOR_BORDER);
-//     doc.setLineWidth(0.3);
-//     doc.rect(margin, cursorY, contentWidth, 12, "FD");
-
-//     doc.setFont("helvetica", "normal");
-//     doc.setFontSize(8);
-//     doc.setTextColor(70, 70, 70);
-//     doc.text("Amount Chargeable (in words):", margin + 3.5, cursorY + 4.5);
-
-//     doc.setFont("helvetica", "normal");
-//     doc.setTextColor(30, 30, 30);
-//     doc.text(
-//       `INR ${numberToWords(grandTotal)}`,
-//       margin + 3.5,
-//       cursorY + 9
-//     );
-
-//     cursorY += 16;
-
-//     const columnGap = 5;
-//     const splitColWidth = (contentWidth - columnGap) / 2;
-//     const leftColX = margin;
-//     const rightColX = leftColX + splitColWidth + columnGap;
-//     const subBannerHeight = 6.5;
-
-//     doc.setFillColor(...COLOR_ICE_BLUE);
-//     doc.rect(leftColX, cursorY, splitColWidth, subBannerHeight, "F");
-//     doc.setDrawColor(...COLOR_BORDER);
-//     doc.rect(leftColX, cursorY, splitColWidth, subBannerHeight, "S");
-
-//     doc.setFont("helvetica", "bold");
-//     doc.setFontSize(8);
-//     doc.setTextColor(...COLOR_NAVY_TEXT);
-//     doc.text("BANK DETAILS", leftColX + 3, cursorY + 4.5);
-
-//     doc.setFillColor(...COLOR_ICE_BLUE);
-//     doc.rect(rightColX, cursorY, splitColWidth, subBannerHeight, "F");
-//     doc.rect(rightColX, cursorY, splitColWidth, subBannerHeight, "S");
-
-//     doc.setFont("helvetica", "bold");
-//     doc.setFontSize(8);
-//     doc.setTextColor(...COLOR_NAVY_TEXT);
-//     doc.text("TAX SUMMARY", rightColX + 3, cursorY + 4.5);
-
-//     const detailStartY = cursorY + subBannerHeight + 3.5;
-
-//     doc.setFont("helvetica", "normal");
-//     doc.setFontSize(7.5);
-//     doc.setTextColor(70, 70, 70);
-
-//     const bankLines = [
-//       `Account Name: ${COMPANY.bank.accountName}`,
-//       `Bank: ${COMPANY.bank.bankName}`,
-//       `Branch: ${COMPANY.bank.branch}`,
-//       `Account No.: ${COMPANY.bank.accountNo}`,
-//       `IFSC: ${COMPANY.bank.ifsc}`,
-//       `SWIFT: ${COMPANY.bank.swift}`,
-//     ];
-
-//     bankLines.forEach((line, i) => {
-//       doc.text(line, leftColX + 2, detailStartY + i * 4);
-//     });
-
-//     autoTable(doc, {
-//       startY: detailStartY - 1,
-//       margin: { left: rightColX, right: margin },
-//       tableWidth: splitColWidth,
-//       head: [["Taxable", "CGST", "SGST", "Total Tax"]],
-//       body: [
-//         [
-//           `Rs. ${subtotal.toFixed(2)}`,
-//           `Rs. ${cgstTotal.toFixed(2)}`,
-//           `Rs. ${sgstTotal.toFixed(2)}`,
-//           `Rs. ${taxTotal.toFixed(2)}`,
-//         ],
-//       ],
-//       theme: "grid",
-//       styles: {
-//         font: "helvetica",
-//         fontSize: 7,
-//         cellPadding: 2,
-//         lineColor: COLOR_BORDER,
-//         lineWidth: 0.2,
-//         textColor: [50, 50, 50],
-//         halign: "center",
-//       },
-//       headStyles: {
-//         fillColor: COLOR_ICE_BLUE,
-//         textColor: COLOR_NAVY_TEXT,
-//         fontStyle: "bold",
-//       },
-//     });
-
-//     cursorY =
-//       Math.max(
-//         detailStartY + bankLines.length * 4,
-//         doc.lastAutoTable.finalY
-//       ) + 6;
-
-//     doc.setFont("helvetica", "bold");
-//     doc.setFontSize(8);
-//     doc.setTextColor(...COLOR_NAVY_TEXT);
-//     doc.text("Declaration", margin + 4, cursorY);
-
-//     doc.setFont("helvetica", "normal");
-//     doc.setFontSize(7);
-//     doc.setTextColor(100, 100, 100);
-//     doc.text(
-//       "We declare that this invoice shows the actual price of the goods and",
-//       margin + 4,
-//       cursorY + 4
-//     );
-//     doc.text(
-//       "services described and that all particulars are true and correct.",
-//       margin + 4,
-//       cursorY + 7.5
-//     );
-
-//     doc.setFont("helvetica", "normal");
-//     doc.setFontSize(8);
-//     doc.setTextColor(60, 60, 60);
-//     doc.text(
-//       `For ${COMPANY.name}`,
-//       pageWidth - margin - 4,
-//       pageHeight - 32,
-//       { align: "right" }
-//     );
-
-//     doc.setDrawColor(...COLOR_BORDER);
-//     doc.line(
-//       pageWidth - margin - 50,
-//       pageHeight - 22,
-//       pageWidth - margin - 4,
-//       pageHeight - 22
-//     );
-
-//     doc.text(
-//       "Authorised Signatory",
-//       pageWidth - margin - 4,
-//       pageHeight - 17,
-//       { align: "right" }
-//     );
-
-//     doc.setFontSize(6.8);
-//     doc.setTextColor(140, 140, 140);
-//     doc.text(
-//       "Computer-generated tax invoice — Thank you for your business!",
-//       pageWidth / 2,
-//       pageHeight - 6,
-//       { align: "center" }
-//     );
-
-//     const isMobile =
-//       /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
-//         navigator.userAgent
-//       ) || window.innerWidth < 768;
-
-//     if (isMobile) {
-//       doc.save(`${invoiceNumber}.pdf`);
-//     } else {
-//       const blob = doc.output("blob");
-//       const blobUrl = URL.createObjectURL(blob);
-//       window.open(blobUrl, "_blank");
-//     }
-//   };
-
-//   // =========================================================
-//   // CHECKOUT
-//   // =========================================================
-//   const checkout = async () => {
-//     if (cart.length === 0) {
-//       toast.warn("Please add at least one product.");
-//       return;
-//     }
-
-//     try {
-//       setGenerating(true);
-
-//       const payload = {
-//         customerId: selectedCustomer._id || null,
-//         customerDetails: {
-//           name: selectedCustomer.name,
-//           phone: selectedCustomer.phone,
-//           email: selectedCustomer.email,
-//           address: selectedCustomer.address,
-//           gstin: selectedCustomer.gstin,
-//         },
-//         items: cart.map((item) => ({
-//           productId: item.productId,
-//           qty: item.qty,
-//         })),
-//         paymentMethod,
-//       };
-
-//       const res = await api.post("/invoices", payload);
-
-//       const invoiceNumber =
-//         res.data?.invoiceNumber || `INV-${Date.now()}`;
-
-//       generateInvoicePDF(invoiceNumber);
-
-//       toast.success(`Bill generated successfully: ${invoiceNumber}`);
-
-//       setCart([]);
-//       clearCustomer();
-//     } catch (error) {
-//       console.error(
-//         "Invoice error:",
-//         error.response?.data || error.message
-//       );
-
-//       toast.error(
-//         error.response?.data?.message || "Bill generate nahi ho paya."
-//       );
-//     } finally {
-//       setGenerating(false);
-//     }
-//   };
-
-//   // =========================================================
-//   // LOADING STATE
-//   // =========================================================
-//   if (loading) {
-//     return (
-//       <div className="flex min-h-[75vh] items-center justify-center bg-slate-50 p-4">
-//         <div className="flex flex-col items-center">
-//           <div className="h-10 w-10 animate-spin rounded-full border-4 border-slate-200 border-t-indigo-600 sm:h-12 sm:w-12" />
-//           <p className="mt-4 text-xs font-semibold uppercase tracking-wider text-slate-500 sm:text-sm">
-//             Loading billing workspace...
-//           </p>
-//         </div>
-//       </div>
-//     );
-//   }
-
-//   // =========================================================
-//   // MAIN VIEW
-//   // =========================================================
-//   return (
-//     <div className="min-h-screen bg-slate-50/70 p-3 sm:p-5 lg:p-6 xl:p-8">
-//       <div className="mx-auto max-w-[1600px] space-y-4 sm:space-y-6">
-
-//         {/* TOP HEADER BAR */}
-//         <header className="flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs transition-all sm:flex-row sm:items-center sm:justify-between sm:p-6">
-//           <div>
-//             <div className="flex items-center gap-2">
-//               <span className="h-2 w-2 rounded-full bg-emerald-500 ring-4 ring-emerald-50" />
-//               <span className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
-//                 POS Workspace
-//               </span>
-//             </div>
-//             <h1 className="mt-1 text-xl font-extrabold tracking-tight text-slate-900 sm:text-2xl lg:text-3xl">
-//               Create Invoice
-//             </h1>
-//             <p className="mt-0.5 text-xs text-slate-500 sm:text-sm">
-//               Generate quick invoices and professional GST tax receipts.
-//             </p>
-//           </div>
-
-//           <div className="flex items-center justify-between gap-4 rounded-xl border border-indigo-100 bg-indigo-50/40 px-4 py-2.5 transition-all hover:bg-indigo-50/70 sm:min-w-[220px] sm:px-5 sm:py-3">
-//             <div>
-//               <p className="text-[10px] font-bold uppercase tracking-wider text-indigo-700">
-//                 Current Payable
-//               </p>
-//               <p className="mt-0.5 text-xl font-black text-indigo-700 sm:text-2xl">
-//                 ₹{grandTotal.toFixed(2)}
-//               </p>
-//             </div>
-//             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-lg text-white shadow-sm shadow-indigo-200">
-//               🧾
-//             </div>
-//           </div>
-//         </header>
-
-//         {/* CUSTOMER PROFILE CARD */}
-//         <section className="rounded-2xl border border-slate-200/90 bg-white p-4 shadow-xs transition-all sm:p-6">
-//           <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
-//             <div>
-//               <h2 className="text-sm font-bold text-slate-900 sm:text-base">
-//                 Customer Details
-//               </h2>
-//               <p className="text-xs text-slate-400">
-//                 Pick a stored client or manually enter details (including Buyer GSTIN).
-//               </p>
+//       {/* EDIT ITEM MODAL */}
+//       {editItem && (
+//         <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-3 backdrop-blur-sm sm:p-4">
+//           <div className="fixed inset-0 cursor-pointer" onClick={() => setEditItem(null)} />
+
+//           <div className="relative z-10 flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-2xl sm:rounded-3xl">
+//             <div className="relative bg-gradient-to-r from-slate-900 to-[#101B3D] p-5 text-white sm:p-6">
+//               <button
+//                 type="button"
+//                 onClick={() => setEditItem(null)}
+//                 className="absolute right-4 top-4 flex h-8 w-8 items-center justify-center rounded-xl bg-white/10 text-slate-300 transition hover:bg-white/20 hover:text-white cursor-pointer"
+//                 title="Close (Esc)"
+//               >
+//                 ✕
+//               </button>
+//               <div className="flex items-center gap-3 pr-10">
+//                 <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-amber-400/30 bg-amber-500/20 text-lg">
+//                   ✏️
+//                 </div>
+//                 <div className="min-w-0">
+//                   <h3 className="text-base font-bold sm:text-lg">Edit Item</h3>
+//                   <p className="truncate text-xs text-slate-300">
+//                     Changes product me bhi save honge.
+//                   </p>
+//                 </div>
+//               </div>
 //             </div>
 
-//             {(selectedCustomer._id ||
-//               selectedCustomer.name ||
-//               selectedCustomer.phone ||
-//               selectedCustomer.email ||
-//               selectedCustomer.address ||
-//               selectedCustomer.gstin) && (
+//             <form onSubmit={saveEdit} noValidate className="space-y-4 overflow-y-auto p-5 sm:p-6">
+//               <TextInput
+//                 label="Product Name"
+//                 value={editItem.name}
+//                 onChange={(e) => handleEditChange("name", e.target.value)}
+//                 required
+//                 error={editErrors.name}
+//               />
+
+//               <div className="grid grid-cols-2 gap-3">
+//                 <TextInput
+//                   label="SKU / Model"
+//                   value={editItem.sku}
+//                   onChange={(e) => handleEditChange("sku", e.target.value)}
+//                   mono
+//                   error={editErrors.sku}
+//                 />
+//                 <TextInput
+//                   label="HSN Code"
+//                   value={editItem.hsn}
+//                   onChange={(e) => handleEditChange("hsn", e.target.value)}
+//                   mono
+//                   error={editErrors.hsn}
+//                 />
+//               </div>
+
+//               <div className="grid grid-cols-3 gap-3">
+//                 <TextInput
+//                   label="Price (₹)"
+//                   type="number"
+//                   min="0"
+//                   inputMode="decimal"
+//                   value={editItem.price}
+//                   onChange={(e) => handleEditChange("price", e.target.value)}
+//                   mono
+//                   required
+//                   error={editErrors.price}
+//                 />
+//                 <GstSelect
+//                   value={editItem.taxRate}
+//                   onChange={(e) => handleEditChange("taxRate", e.target.value)}
+//                   error={editErrors.taxRate}
+//                 />
+//                 <TextInput
+//                   label="Qty"
+//                   type="number"
+//                   min="1"
+//                   inputMode="numeric"
+//                   value={editItem.qty}
+//                   onChange={(e) => handleEditChange("qty", e.target.value)}
+//                   mono
+//                   error={editErrors.qty}
+//                 />
+//               </div>
+
+//               <div className="flex flex-col-reverse gap-2.5 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
 //                 <button
 //                   type="button"
-//                   onClick={clearCustomer}
-//                   className="rounded-lg border border-red-200 bg-red-50/60 px-3 py-1.5 text-xs font-bold text-red-600 transition-all duration-150 hover:bg-red-500 hover:text-white active:scale-95 cursor-pointer"
+//                   onClick={() => {
+//                     const target = cart.find((i) => i.productId === editItem.productId);
+//                     if (target) deleteItem(target);
+//                     setEditItem(null);
+//                   }}
+//                   className="rounded-xl border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-bold text-red-600 transition hover:bg-red-100 cursor-pointer"
 //                 >
-//                   Clear Customer
+//                   Delete from Bill
 //                 </button>
-//               )}
-//           </div>
 
-//           {/* Customer Search Dropdown */}
-//           <div className="relative mb-4">
-//             <input
-//               value={customerSearch}
-//               onChange={(e) => setCustomerSearch(e.target.value)}
-//               placeholder="Search customer by name, mobile number, email or GSTIN..."
-//               className="w-full rounded-xl border border-slate-200 bg-slate-50/50 px-4 py-2.5 text-sm font-medium text-slate-800 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-600 focus:bg-white focus:ring-4 focus:ring-indigo-600/10 sm:py-3"
-//             />
-
-//             {customerSearch && filteredCustomers.length > 0 && (
-//               <div className="absolute left-0 right-0 top-full z-40 mt-1.5 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl">
-//                 {filteredCustomers.map((customer) => (
+//                 <div className="flex gap-2.5">
 //                   <button
 //                     type="button"
-//                     key={customer._id}
-//                     onClick={() => selectCustomer(customer)}
-//                     className="flex w-full items-center justify-between gap-3 border-b border-slate-100 px-4 py-3 text-left transition-colors last:border-0 hover:bg-indigo-50/80 cursor-pointer"
+//                     onClick={() => setEditItem(null)}
+//                     className="flex-1 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-bold text-slate-700 transition hover:bg-slate-100 cursor-pointer sm:flex-none"
 //                   >
-//                     <div className="min-w-0">
-//                       <p className="truncate text-sm font-bold text-slate-900">
-//                         {customer.name}
-//                       </p>
-//                       <p className="mt-0.5 truncate text-xs text-slate-400">
-//                         {customer.phone || "No phone"} {customer.email ? ` · ${customer.email}` : ""}
-//                         {(customer.gstin || customer.gst) ? ` · GSTIN: ${customer.gstin || customer.gst}` : ""}
-//                       </p>
-//                     </div>
-//                     <span className="shrink-0 rounded-lg bg-indigo-50 px-2.5 py-1 text-xs font-bold text-indigo-700 transition group-hover:bg-indigo-600 group-hover:text-white">
-//                       Apply
-//                     </span>
+//                     Cancel
 //                   </button>
-//                 ))}
-//               </div>
-//             )}
-//           </div>
-
-//           {/* Editable Fields Grid (5 Columns with GSTIN Input) */}
-//           <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:grid-cols-5">
-//             <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3 transition-colors hover:border-indigo-200 focus-within:border-indigo-600 focus-within:bg-white">
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                 Customer Name
-//               </label>
-//               <input
-//                 value={selectedCustomer.name}
-//                 onChange={(e) => updateCustomerField("name", e.target.value)}
-//                 placeholder="Walk-in Customer"
-//                 className="mt-1 w-full bg-transparent text-sm font-bold text-slate-800 outline-none placeholder:font-normal placeholder:text-slate-400"
-//               />
-//             </div>
-
-//             <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3 transition-colors hover:border-indigo-200 focus-within:border-indigo-600 focus-within:bg-white">
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                 Phone Number
-//               </label>
-//               <input
-//                 value={selectedCustomer.phone}
-//                 onChange={(e) => updateCustomerField("phone", e.target.value)}
-//                 placeholder="e.g. +91 98765 43210"
-//                 className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400 font-mono"
-//               />
-//             </div>
-
-//             <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3 transition-colors hover:border-indigo-200 focus-within:border-indigo-600 focus-within:bg-white">
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                 Email Address
-//               </label>
-//               <input
-//                 value={selectedCustomer.email}
-//                 onChange={(e) => updateCustomerField("email", e.target.value)}
-//                 placeholder="name@domain.com"
-//                 className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400"
-//               />
-//             </div>
-
-//             <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3 transition-colors hover:border-indigo-200 focus-within:border-indigo-600 focus-within:bg-white">
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                 Address / City
-//               </label>
-//               <input
-//                 value={selectedCustomer.address}
-//                 onChange={(e) => updateCustomerField("address", e.target.value)}
-//                 placeholder="Street address or city..."
-//                 className="mt-1 w-full bg-transparent text-sm font-semibold text-slate-700 outline-none placeholder:font-normal placeholder:text-slate-400"
-//               />
-//             </div>
-
-//             {/* Buyer GSTIN Input Field */}
-//             <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3 transition-colors hover:border-indigo-200 focus-within:border-indigo-600 focus-within:bg-white">
-//               <label className="text-[10px] font-bold uppercase tracking-wider text-indigo-600">
-//                 Buyer GSTIN
-//               </label>
-//               <input
-//                 value={selectedCustomer.gstin}
-//                 onChange={(e) => updateCustomerField("gstin", e.target.value.toUpperCase())}
-//                 placeholder="e.g. 08AAACR5055K1Z8"
-//                 className="mt-1 w-full bg-transparent text-sm font-bold text-indigo-700 font-mono uppercase outline-none placeholder:font-normal placeholder:text-slate-400"
-//               />
-//             </div>
-//           </div>
-//         </section>
-
-//         {/* WORKSPACE DUAL-PANE LAYOUT */}
-//         <div className="grid grid-cols-1 items-start gap-4 lg:grid-cols-[minmax(0,1fr)_370px] xl:grid-cols-[minmax(0,1fr)_420px] lg:gap-6">
-
-//           {/* LEFT: PRODUCTS LIST & CART TABLE */}
-//           <main className="min-w-0 space-y-4 sm:space-y-6">
-
-//             {/* Search Filter Bar */}
-//             <section className="rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-xs transition-all sm:p-4">
-//               <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
-//                 <div className="relative flex-1">
-//                   <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-sm text-slate-400">
-//                     🔍
-//                   </span>
-//                   <input
-//                     value={search}
-//                     onChange={(e) => setSearch(e.target.value)}
-//                     placeholder="Search product name or SKU code..."
-//                     className="w-full rounded-xl border border-slate-200 bg-slate-50/60 py-2.5 pl-10 pr-4 text-xs sm:text-sm font-medium text-slate-900 outline-none transition-all placeholder:text-slate-400 hover:border-slate-300 focus:border-indigo-600 focus:bg-white focus:ring-4 focus:ring-indigo-600/10"
-//                   />
-//                 </div>
-
-//                 <div className="flex items-center justify-between sm:justify-center rounded-xl bg-slate-100 px-4 py-2.5 text-xs font-bold text-slate-600 shrink-0">
-//                   <span>Available Stock</span>
-//                   <span className="ml-2 font-extrabold text-indigo-700">{filteredProducts.length}</span>
-//                 </div>
-//               </div>
-//             </section>
-
-//             {/* Product Cards Grid */}
-//             <section className="space-y-2.5">
-//               <div className="flex items-center justify-between px-1">
-//                 <div>
-//                   <h2 className="text-sm font-bold text-slate-900 sm:text-base">
-//                     Catalogue
-//                   </h2>
-//                   <p className="text-xs text-slate-400">
-//                     Tap Add to add item into the invoice cart.
-//                   </p>
-//                 </div>
-//               </div>
-
-//               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-2">
-//                 {filteredProducts.map((product) => {
-//                   const cartItem = cart.find(
-//                     (item) => item.productId === product._id
-//                   );
-//                   const outOfStock = Number(product.stock) <= 0;
-
-//                   return (
-//                     <div
-//                       key={product._id}
-//                       className="group flex flex-col justify-between rounded-2xl border border-slate-200/80 bg-white p-4 text-left shadow-xs transition-all duration-200 hover:-translate-y-0.5 hover:border-indigo-300 hover:shadow-md"
-//                     >
-//                       <div>
-//                         <div className="mb-2 flex items-start justify-between gap-2">
-//                           <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-base transition-transform group-hover:scale-105">
-//                             📦
-//                           </div>
-
-//                           <span
-//                             className={`rounded-full px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${outOfStock
-//                               ? "bg-red-50 text-red-600 border border-red-200/50"
-//                               : "bg-emerald-50 text-emerald-600 border border-emerald-200/50"
-//                               }`}
-//                           >
-//                             {outOfStock ? "Out of Stock" : `Stock: ${product.stock}`}
-//                           </span>
-//                         </div>
-
-//                         <p className="line-clamp-1 font-bold text-slate-800 transition-colors group-hover:text-indigo-600 text-sm sm:text-base">
-//                           {product.name}
-//                         </p>
-
-//                         <p className="mt-0.5 truncate text-xs text-slate-400 font-mono">
-//                           SKU: {product.sku || "-"}
-//                         </p>
-//                       </div>
-
-//                       <div className="mt-4 flex items-center justify-between gap-2 border-t border-slate-100 pt-3">
-//                         <div>
-//                           <p className="text-base sm:text-lg font-extrabold text-indigo-600">
-//                             ₹{Number(product.price || 0).toFixed(2)}
-//                           </p>
-//                           <p className="text-[10px] font-medium text-slate-400">
-//                             GST: {product.taxRate || 0}%
-//                           </p>
-//                         </div>
-
-//                         {cartItem ? (
-//                           <div className="flex h-8 sm:h-9 items-center gap-1.5 rounded-xl bg-indigo-600 px-1.5 shadow-sm">
-//                             <button
-//                               type="button"
-//                               onClick={() => updateQty(product._id, cartItem.qty - 1)}
-//                               className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-white/20 text-xs font-bold text-white transition hover:bg-white/30 active:scale-90 cursor-pointer"
-//                               title="Decrease"
-//                             >
-//                               −
-//                             </button>
-
-//                             <span className="min-w-[1.25rem] text-center text-xs sm:text-sm font-extrabold text-white">
-//                               {cartItem.qty}
-//                             </span>
-
-//                             <button
-//                               type="button"
-//                               onClick={() => addToCart(product)}
-//                               disabled={cartItem.qty >= Number(product.stock)}
-//                               className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-white/20 text-xs font-bold text-white transition hover:bg-white/30 active:scale-90 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-//                               title="Increase"
-//                             >
-//                               +
-//                             </button>
-//                           </div>
-//                         ) : (
-//                           <button
-//                             type="button"
-//                             onClick={() => addToCart(product)}
-//                             disabled={outOfStock}
-//                             className="inline-flex h-8 sm:h-9 items-center justify-center rounded-xl bg-indigo-600 px-3.5 text-xs font-bold text-white shadow-xs transition-all hover:bg-indigo-700 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-//                           >
-//                             + Add
-//                           </button>
-//                         )}
-//                       </div>
-//                     </div>
-//                   );
-//                 })}
-
-//                 {filteredProducts.length === 0 && (
-//                   <div className="col-span-full rounded-2xl border border-dashed border-slate-300 bg-white py-12 text-center">
-//                     <div className="text-3xl">📦</div>
-//                     <p className="mt-2 text-sm font-bold text-slate-700">
-//                       No matching products
-//                     </p>
-//                     <p className="mt-0.5 text-xs text-slate-400">
-//                       Try searching with another product term or SKU.
-//                     </p>
-//                   </div>
-//                 )}
-//               </div>
-//             </section>
-
-//             {/* CART TABLE VIEW */}
-//             <section className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
-//               <div className="flex items-center justify-between border-b border-slate-200/80 bg-slate-50/50 px-4 py-3.5 sm:px-5">
-//                 <div>
-//                   <h2 className="text-sm sm:text-base font-bold text-slate-900">
-//                     Selected Items
-//                   </h2>
-//                   <p className="text-xs text-slate-400">
-//                     Check item rates, tax deductions, and quantities.
-//                   </p>
-//                 </div>
-
-//                 <span className="shrink-0 rounded-full border border-indigo-200 bg-indigo-50 px-3 py-0.5 text-xs font-bold text-indigo-700">
-//                   {cart.length} in Cart
-//                 </span>
-//               </div>
-
-//               {/* Responsive Table Wrapper */}
-//               <div className="overflow-x-auto">
-//                 <table className="w-full min-w-[650px] border-collapse text-left text-xs sm:text-sm">
-//                   <thead>
-//                     <tr className="border-b border-slate-200 bg-slate-100/70 text-[11px] font-bold uppercase tracking-wider text-slate-500">
-//                       <th className="px-3 py-3 text-center">#</th>
-//                       <th className="px-3 py-3">Product</th>
-//                       <th className="px-3 py-3">SKU</th>
-//                       <th className="px-3 py-3 text-center">Qty</th>
-//                       <th className="px-3 py-3 text-right">Price</th>
-//                       <th className="px-3 py-3 text-center">GST</th>
-//                       <th className="px-3 py-3 text-right">Tax</th>
-//                       <th className="px-3 py-3 text-right">Total</th>
-//                       <th className="px-3 py-3 text-center">Del</th>
-//                     </tr>
-//                   </thead>
-
-//                   <tbody className="divide-y divide-slate-100 font-medium">
-//                     {cart.length === 0 ? (
-//                       <tr>
-//                         <td colSpan="9" className="py-12 text-center text-slate-400">
-//                           <div className="text-3xl">🧾</div>
-//                           <p className="mt-2 text-sm font-semibold text-slate-600">
-//                             No items in current invoice
-//                           </p>
-//                           <p className="text-xs text-slate-400">
-//                             Click on Catalogue &apos;+ Add&apos; button above.
-//                           </p>
-//                         </td>
-//                       </tr>
+//                   <button
+//                     type="submit"
+//                     disabled={savingEdit}
+//                     className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-indigo-600 px-5 py-2.5 text-sm font-bold text-white shadow-xs transition hover:bg-indigo-700 active:scale-95 disabled:opacity-50 cursor-pointer sm:flex-none"
+//                   >
+//                     {savingEdit ? (
+//                       <>
+//                         <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+//                         <span>Saving...</span>
+//                       </>
 //                     ) : (
-//                       cart.map((item, index) => {
-//                         const taxable = item.price * item.qty;
-//                         const tax = (taxable * item.taxRate) / 100;
-//                         const total = taxable + tax;
-
-//                         return (
-//                           <tr
-//                             key={item.productId}
-//                             className="transition-colors hover:bg-slate-50/80"
-//                           >
-//                             <td className="px-3 py-3 text-center text-slate-400 font-mono text-xs">
-//                               {index + 1}
-//                             </td>
-
-//                             <td className="max-w-[200px] truncate px-3 py-3 font-bold text-slate-800">
-//                               {item.name}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-xs text-slate-400 font-mono">
-//                               {item.sku}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-center">
-//                               <input
-//                                 type="number"
-//                                 min="1"
-//                                 max={item.stock}
-//                                 value={item.qty}
-//                                 onChange={(e) => updateQty(item.productId, e.target.value)}
-//                                 className="w-14 rounded-lg border border-slate-200 bg-slate-50 py-1 text-center font-bold text-slate-800 outline-none focus:border-indigo-600 focus:bg-white focus:ring-2 focus:ring-indigo-100 font-mono"
-//                               />
-//                             </td>
-
-//                             <td className="px-3 py-3 text-right text-slate-700">
-//                               ₹{item.price.toFixed(2)}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-center">
-//                               <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-bold text-amber-700">
-//                                 {item.taxRate}%
-//                               </span>
-//                             </td>
-
-//                             <td className="px-3 py-3 text-right text-slate-600 font-medium">
-//                               ₹{tax.toFixed(2)}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-right font-black text-slate-900">
-//                               ₹{total.toFixed(2)}
-//                             </td>
-
-//                             <td className="px-3 py-3 text-center">
-//                               <button
-//                                 type="button"
-//                                 onClick={() => removeItem(item.productId)}
-//                                 className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 transition hover:bg-red-50 hover:text-red-600 cursor-pointer"
-//                                 title="Remove item"
-//                               >
-//                                 ✕
-//                               </button>
-//                             </td>
-//                           </tr>
-//                         );
-//                       })
+//                       <span>Save Changes</span>
 //                     )}
-//                   </tbody>
-//                 </table>
+//                   </button>
+//                 </div>
 //               </div>
-//             </section>
-//           </main>
-
-//           {/* RIGHT: BILL SUMMARY & CHECKOUT */}
-//           <aside className="w-full lg:sticky lg:top-6 lg:self-start">
-//             <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white shadow-xs">
-
-//               <div className="flex items-center justify-between border-b border-slate-200/80 px-5 py-4">
-//                 <div>
-//                   <h2 className="text-base font-extrabold text-slate-900">
-//                     Bill Summary
-//                   </h2>
-//                   <p className="text-xs text-slate-400">
-//                     Payment details & dispatch breakdown.
-//                   </p>
-//                 </div>
-//                 <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-indigo-50 text-base">
-//                   💳
-//                 </span>
-//               </div>
-
-//               <div className="p-4 sm:p-5 space-y-4">
-
-//                 {/* Active Customer Badge */}
-//                 <div className="rounded-xl border border-slate-200/80 bg-slate-50/70 p-3">
-//                   <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                     Billed To
-//                   </p>
-//                   <p className="mt-0.5 truncate text-sm font-bold text-slate-800">
-//                     {selectedCustomer.name || "Walk-in Customer"}
-//                   </p>
-//                   {selectedCustomer.phone && (
-//                     <p className="mt-0.5 text-xs text-slate-500 font-mono">
-//                       Phone: {selectedCustomer.phone}
-//                     </p>
-//                   )}
-//                   {selectedCustomer.gstin && (
-//                     <p className="mt-0.5 text-xs font-bold text-indigo-700 font-mono uppercase">
-//                       GSTIN: {selectedCustomer.gstin}
-//                     </p>
-//                   )}
-//                 </div>
-
-//                 {/* Amount Computations */}
-//                 <div className="space-y-2.5 text-xs sm:text-sm">
-//                   <div className="flex items-center justify-between text-slate-500 font-medium">
-//                     <span>Total Quantity</span>
-//                     <span className="font-bold text-slate-800">{totalItems} Pcs</span>
-//                   </div>
-//                   <div className="flex items-center justify-between text-slate-500 font-medium">
-//                     <span>Taxable Base</span>
-//                     <span className="font-semibold text-slate-800">₹{subtotal.toFixed(2)}</span>
-//                   </div>
-//                   <div className="flex items-center justify-between text-slate-500 font-medium">
-//                     <span>GST (CGST + SGST)</span>
-//                     <span className="font-semibold text-amber-600">₹{taxTotal.toFixed(2)}</span>
-//                   </div>
-//                 </div>
-
-//                 {/* Grand Total Box */}
-//                 <div className="rounded-xl bg-[#0e1726] p-4 text-white shadow-inner">
-//                   <div className="flex items-center justify-between">
-//                     <div>
-//                       <p className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
-//                         Total Amount Due
-//                       </p>
-//                       <p className="mt-1 text-2xl font-black text-white sm:text-3xl">
-//                         ₹{grandTotal.toFixed(2)}
-//                       </p>
-//                     </div>
-//                     <span className="rounded-full bg-emerald-500/20 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-emerald-400 border border-emerald-500/30">
-//                       INR Total
-//                     </span>
-//                   </div>
-//                 </div>
-
-//                 {/* Payment Selector */}
-//                 <div>
-//                   <label className="mb-1.5 block text-xs font-bold text-slate-600">
-//                     Payment Channel
-//                   </label>
-//                   <div className="grid grid-cols-3 gap-2">
-//                     {[
-//                       { value: "cash", label: "Cash", icon: "💵" },
-//                       { value: "upi", label: "UPI", icon: "📱" },
-//                       { value: "card", label: "Card", icon: "💳" },
-//                     ].map((method) => {
-//                       const active = paymentMethod === method.value;
-//                       return (
-//                         <button
-//                           key={method.value}
-//                           type="button"
-//                           onClick={() => setPaymentMethod(method.value)}
-//                           className={`flex flex-col items-center justify-center rounded-xl border py-2.5 transition-all cursor-pointer ${active
-//                             ? "border-indigo-600 bg-indigo-50/80 text-indigo-700 shadow-xs"
-//                             : "border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50"
-//                             }`}
-//                         >
-//                           <span className="text-base">{method.icon}</span>
-//                           <span className="mt-1 text-xs font-bold">{method.label}</span>
-//                         </button>
-//                       );
-//                     })}
-//                   </div>
-//                 </div>
-
-//                 {/* Checkout Button */}
-//                 <button
-//                   type="button"
-//                   onClick={checkout}
-//                   disabled={cart.length === 0 || generating}
-//                   className="flex w-full items-center justify-center gap-2 rounded-xl bg-indigo-600 py-3.5 text-sm font-bold text-white shadow-sm transition-all hover:bg-indigo-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40 cursor-pointer"
-//                 >
-//                   {generating ? (
-//                     <>
-//                       <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-//                       <span>Generating Invoice...</span>
-//                     </>
-//                   ) : (
-//                     <>
-//                       <span>🧾</span>
-//                       <span>Generate Bill & PDF</span>
-//                     </>
-//                   )}
-//                 </button>
-
-//                 <p className="text-center text-[10px] text-slate-400">
-//                   Mobile devices par PDF download hogi, Desktop par preview open hoga.
-//                 </p>
-//               </div>
-//             </div>
-//           </aside>
+//             </form>
+//           </div>
 //         </div>
-//       </div>
+//       )}
 //     </div>
 //   );
 // }
+
+
+
+
+
+
+
